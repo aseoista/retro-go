@@ -242,6 +242,8 @@ static void lcd_init(void)
 
     ILI9341_CMD(0x01);          // Reset
     rg_usleep(5 * 1000);        // Wait 5ms after reset
+    ILI9341_CMD(0x21);          // Invert colors
+    rg_usleep(5 * 1000);        // Wait 5ms after reset
     ILI9341_CMD(0x3A, 0X05);    // Pixel Format Set RGB565
     #ifdef RG_SCREEN_INIT
         RG_SCREEN_INIT();
