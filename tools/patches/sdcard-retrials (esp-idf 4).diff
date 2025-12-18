@@ -1,5 +1,5 @@
---- a/components/sdmmc/sdmmc_cmd.c	2025-12-14 12:56:05.965876398 +0100
-+++ a/components/sdmmc/sdmmc_cmd.c	2025-12-14 13:14:25.211350030 +0100
+--- a/components/driver/sdmmc_cmd.c	2025-12-14 12:56:05.965876398 +0100
++++ a/components/driver/sdmmc_cmd.c	2025-12-14 13:14:25.211350030 +0100
 @@ -20,7 +20,12 @@
      int slot = card->host.slot;
      ESP_LOGV(TAG, "sending cmd slot=%d op=%d arg=%x flags=%x data=%p blklen=%d datalen=%d timeout=%d",
