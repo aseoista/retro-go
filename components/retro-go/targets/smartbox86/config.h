@@ -12,8 +12,50 @@
 #define RG_AUDIO_USE_EXT_DAC  0
 #define RG_AUDIO_USE_SDL2     0
 
-// --- Input (Phase 2; GPIOs TBD from schematic) ---
-#define RG_GAMEPAD_GPIO_MAP {}
+// --- Input (Phase 2) ---
+// All buttons: active-low (external pull-up + internal pull-up, pressed = GND)
+// GPIO assignments are tentative — verify against board schematic before soldering.
+// Known-busy GPIOs avoided: 8,9 (I2C), 15–17 (I2S), 25–32 (MIPI-DSI),
+//   37,38 (USB-UART), 39–44 (SDMMC), 35 (BOOT/MENU).
+
+// GPIO aliases — update from schematic when available
+#define RG_GPIO_BTN_UP      GPIO_NUM_4
+#define RG_GPIO_BTN_DOWN    GPIO_NUM_5
+#define RG_GPIO_BTN_LEFT    GPIO_NUM_6
+#define RG_GPIO_BTN_RIGHT   GPIO_NUM_7
+#define RG_GPIO_BTN_A       GPIO_NUM_0
+#define RG_GPIO_BTN_B       GPIO_NUM_1
+#define RG_GPIO_BTN_X       GPIO_NUM_10
+#define RG_GPIO_BTN_Y       GPIO_NUM_11
+#define RG_GPIO_BTN_START   GPIO_NUM_2
+#define RG_GPIO_BTN_SELECT  GPIO_NUM_3
+// GPIO_NUM_35 is the on-board BOOT button (active-low, no external pull-up needed)
+#define RG_GPIO_BTN_MENU    GPIO_NUM_35
+// Volume-/+ reuse RG_KEY_L/R — retro-go has no dedicated volume key;
+// emulators that need real L/R shoulder buttons can use touch overlay (Phase 6).
+#define RG_GPIO_BTN_VOL_DN  GPIO_NUM_12
+#define RG_GPIO_BTN_VOL_UP  GPIO_NUM_13
+
+#define RG_GAMEPAD_GPIO_MAP {                                              \
+    {RG_KEY_UP,     .num = RG_GPIO_BTN_UP,     .pullup = 1, .level = 0}, \
+    {RG_KEY_DOWN,   .num = RG_GPIO_BTN_DOWN,   .pullup = 1, .level = 0}, \
+    {RG_KEY_LEFT,   .num = RG_GPIO_BTN_LEFT,   .pullup = 1, .level = 0}, \
+    {RG_KEY_RIGHT,  .num = RG_GPIO_BTN_RIGHT,  .pullup = 1, .level = 0}, \
+    {RG_KEY_A,      .num = RG_GPIO_BTN_A,      .pullup = 1, .level = 0}, \
+    {RG_KEY_B,      .num = RG_GPIO_BTN_B,      .pullup = 1, .level = 0}, \
+    {RG_KEY_X,      .num = RG_GPIO_BTN_X,      .pullup = 1, .level = 0}, \
+    {RG_KEY_Y,      .num = RG_GPIO_BTN_Y,      .pullup = 1, .level = 0}, \
+    {RG_KEY_START,  .num = RG_GPIO_BTN_START,  .pullup = 1, .level = 0}, \
+    {RG_KEY_SELECT, .num = RG_GPIO_BTN_SELECT, .pullup = 1, .level = 0}, \
+    {RG_KEY_MENU,   .num = RG_GPIO_BTN_MENU,   .pullup = 0, .level = 0}, \
+    {RG_KEY_L,      .num = RG_GPIO_BTN_VOL_DN, .pullup = 1, .level = 0}, \
+    {RG_KEY_R,      .num = RG_GPIO_BTN_VOL_UP, .pullup = 1, .level = 0}, \
+}
+
+// Virtual combo: START+SELECT also triggers MENU (useful before physical MENU wire is confirmed)
+#define RG_GAMEPAD_VIRT_MAP {                              \
+    {RG_KEY_MENU, .src = RG_KEY_START | RG_KEY_SELECT},   \
+}
 
 // --- Storage ---
 #define RG_STORAGE_ROOT          "/sd"
