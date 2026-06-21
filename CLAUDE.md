@@ -112,10 +112,12 @@ Active porting effort on branch `esp32p4smartbox86`. Target hardware: Waveshare 
 |-------|-------------|--------|
 | 0 | Target scaffold — compiles | Done |
 | 1 | Boots on hardware, serial output | Done |
-| 2 | GPIO button map | Done (tentative GPIOs) |
+| 2 | GPIO button map | Done (GPIOs remapped — see table below) |
 | 3 | SD card storage (FATFS, 4-bit SDMMC) | Done |
 | 4 | MIPI-DSI display (ST7703 720×720, BGR888) | Done (builds; needs hardware test) |
-| 5–9 | Audio, touch, PPA, OTA | Pending |
+| 5 | Audio (ES8311 + I2S) | Pending |
+| 6 | Touch overlay (GT911 → virtual gamepad) | Done (builds; needs hardware test) |
+| 7–9 | PPA scaling, OTA, polish | Pending |
 
 ### Build and flash for smartbox86
 
@@ -152,25 +154,25 @@ These changes were required to make the ESP32-P4 target build; they affect share
 
 ### Button layout
 
-All buttons are active-low (pressed = GND). GPIO assignments are **tentative** — verify from the board schematic before soldering.
+All buttons are active-low (pressed = GND). GPIOs 0–6, 18–22 are free from schematic conflicts; **must verify against final board schematic before soldering**.
 
 | Button | GPIO | `rg_key_t` | Notes |
 |--------|------|------------|-------|
 | D-Up | 4 | `RG_KEY_UP` | internal pull-up |
 | D-Down | 5 | `RG_KEY_DOWN` | internal pull-up |
 | D-Left | 6 | `RG_KEY_LEFT` | internal pull-up |
-| D-Right | 7 | `RG_KEY_RIGHT` | internal pull-up |
+| D-Right | **18** | `RG_KEY_RIGHT` | remapped from 7 (conflicts with I2C SDA) |
 | A | 0 | `RG_KEY_A` | internal pull-up |
 | B | 1 | `RG_KEY_B` | internal pull-up |
-| X | 10 | `RG_KEY_X` | internal pull-up |
-| Y | 11 | `RG_KEY_Y` | internal pull-up |
+| X | **19** | `RG_KEY_X` | remapped from 10 (conflicts with I2S WS) |
+| Y | **20** | `RG_KEY_Y` | remapped from 11 (conflicts with I2S DSIN) |
 | Start | 2 | `RG_KEY_START` | internal pull-up |
 | Select | 3 | `RG_KEY_SELECT` | internal pull-up |
 | Menu | 35 | `RG_KEY_MENU` | on-board BOOT button, board pull-up |
-| L | 12 | `RG_KEY_L` | internal pull-up |
-| R | 13 | `RG_KEY_R` | internal pull-up |
+| L | **21** | `RG_KEY_L` | remapped from 12 (conflicts with I2S BCLK) |
+| R | **22** | `RG_KEY_R` | remapped from 13 (conflicts with I2S MCLK) |
 
-Virtual combo: START+SELECT → MENU (fallback while physical MENU wire is unconfirmed).
+Virtual combo: START+SELECT → MENU (two-finger touch or physical button combo).
 
 ### Target-specific notes
 
@@ -178,6 +180,11 @@ Virtual combo: START+SELECT → MENU (fallback while physical MENU wire is uncon
 - SDMMC: Slot 0 IO MUX, CLK=43, CMD=44, D0=39, D1=40, D2=41, D3=42. **Must use 4-bit mode** (`RG_STORAGE_SDMMC_4BIT`): in 4-bit mode the driver drives D3 HIGH before card init; in 1-bit mode D3 is skipped and the card stays in SPI mode (no response). Do NOT define `RG_GPIO_SDSPI_CLK/CMD/D0`; `SDMMC_SLOT_CONFIG_DEFAULT()` already provides the IO MUX pin values and the driver falls back to IO MUX automatically for Slot 0 on P4. On first power-on the initial 20 MHz attempt may time-out; the 400 KHz retry succeeds and subsequent boots work at 20 MHz.
 - Display driver: MIPI-DSI software driver (`mipi_dsi.h`, driver 10) — ST7703 720×720 BGR888, double-buffered; needs hardware test
 - Audio driver: dummy (Phase 5 will add ES8311 I2S codec driver)
+- **Confirmed EP44B pin assignments** (from Waveshare BSP `esp32_p4_wifi6_touch_lcd_4b.h`):
+  - I2C: SDA=GPIO7, SCL=GPIO8 (shared by GT911 touch + ES8311 audio codec)
+  - I2S (ES8311): BCLK=12, MCLK=13, WS/LCLK=10, DOUT=9, DIN=11; Amp enable=GPIO53
+  - GT911 touch: RST=GPIO23, INT=NC (not connected); I2C addr 0x5D
+- Touch overlay (Phase 6): `RG_GAMEPAD_TOUCH_MAP` divides the 720×720 display into 14 hit zones (L/R shoulders, D-pad, face buttons X/Y/A/B, navigation row SELECT/MENU/OPTION/START). GT911 init is in `drivers/input/gt911.h`; polling added to `rg_input.c` via `#ifdef RG_GAMEPAD_TOUCH_MAP`.
 
 ## Key Files
 
@@ -193,6 +200,7 @@ Virtual combo: START+SELECT → MENU (fallback while physical MENU wire is uncon
 | `tools/gen_images.py` | Converts PNG theme assets to compiled C arrays |
 | `tools/patches/` | Required ESP-IDF patches |
 | `components/retro-go/drivers/display/mipi_dsi.h` | Phase 4: MIPI-DSI display driver (ESP32-P4 / Waveshare EP44B) |
+| `components/retro-go/drivers/input/gt911.h` | Phase 6: GT911 touch driver — raw I2C polling, no BSP dependency |
 | `components/esp_lcd_st7703/` | Local copy of Waveshare ST7703 panel driver (no BSP/LVGL dependency) |
 
 ## Theme & Localization

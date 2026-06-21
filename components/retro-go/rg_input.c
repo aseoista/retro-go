@@ -38,6 +38,11 @@ static rg_keymap_serial_t keymap_serial[] = RG_GAMEPAD_SERIAL_MAP;
 #ifdef RG_GAMEPAD_VIRT_MAP
 static rg_keymap_virt_t keymap_virt[] = RG_GAMEPAD_VIRT_MAP;
 #endif
+#ifdef RG_GAMEPAD_TOUCH_MAP
+static rg_keymap_touch_t keymap_touch[] = RG_GAMEPAD_TOUCH_MAP;
+#include "drivers/input/gt911.h"
+static bool s_touch_active = false;
+#endif
 static bool input_task_running = false;
 static uint32_t gamepad_state = -1; // _Atomic
 static uint32_t gamepad_mapped = 0;
@@ -199,6 +204,21 @@ bool rg_input_read_gamepad_raw(uint32_t *out)
     }
 #endif
 
+#if defined(RG_GAMEPAD_TOUCH_MAP)
+    if (s_touch_active) {
+        gt911_pt_t pts[GT911_MAX_POINTS];
+        int n = gt911_get_touches(pts, GT911_MAX_POINTS);
+        for (int t = 0; t < n; t++) {
+            for (size_t i = 0; i < RG_COUNT(keymap_touch); i++) {
+                const rg_keymap_touch_t *z = &keymap_touch[i];
+                if (pts[t].x >= (uint16_t)z->x_min && pts[t].x <= (uint16_t)z->x_max &&
+                    pts[t].y >= (uint16_t)z->y_min && pts[t].y <= (uint16_t)z->y_max)
+                    state |= z->key;
+            }
+        }
+    }
+#endif
+
 #if defined(RG_GAMEPAD_VIRT_MAP)
     for (size_t i = 0; i < RG_COUNT(keymap_virt); ++i)
     {
@@ -332,6 +352,17 @@ void rg_input_init(void)
     gpio_set_level(RG_GPIO_GAMEPAD_LATCH, 0);
     gpio_set_level(RG_GPIO_GAMEPAD_CLOCK, 1);
     UPDATE_GLOBAL_MAP(keymap_serial);
+#endif
+
+#if defined(RG_GAMEPAD_TOUCH_MAP)
+    RG_LOGI("Initializing GT911 touch driver...");
+    rg_i2c_init();
+    s_touch_active = gt911_init();
+    if (s_touch_active) {
+        UPDATE_GLOBAL_MAP(keymap_touch);
+    } else {
+        RG_LOGW("GT911 touch init failed — touch input disabled.\n");
+    }
 #endif
 
 

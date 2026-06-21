@@ -16,27 +16,36 @@
 #define RG_AUDIO_USE_EXT_DAC  0
 #define RG_AUDIO_USE_SDL2     0
 
-// --- Input (Phase 2) ---
-// All buttons: active-low (external pull-up + internal pull-up, pressed = GND)
-// GPIO assignments are tentative — verify against board schematic before soldering.
-// Known-busy GPIOs avoided: 8,9 (I2C), 15–17 (I2S), 25–32 (MIPI-DSI),
-//   37,38 (USB-UART), 39–44 (SDMMC), 35 (BOOT/MENU).
+// --- Input ---
+// Physical GPIO buttons (Phase 2, tentative — must re-verify against schematic)
+// *** WARNING: KNOWN GPIO CONFLICTS with Phase 5/6 peripherals: ***
+//   GPIO7  = BTN_RIGHT ↔ I2C SDA (BSP: BSP_I2C_SDA)
+//   GPIO9  = I2S DOUT (BSP: BSP_I2S_DOUT)
+//   GPIO10 = BTN_X    ↔ I2S LCLK/WS (BSP: BSP_I2S_LCLK)
+//   GPIO11 = BTN_Y    ↔ I2S DSIN (BSP: BSP_I2S_DSIN)
+//   GPIO12 = BTN_L    ↔ I2S SCLK/BCLK (BSP: BSP_I2S_SCLK)
+//   GPIO13 = BTN_R    ↔ I2S MCLK (BSP: BSP_I2S_MCLK)
+// These must be remapped to free GPIOs (e.g. 18-24, 33-36) before soldering.
+// Phase 6 touch overlay is the primary input until the GPIO map is finalised.
+//
+// Available GPIOs (verified free from BSP schematic): 0-6, 14, 18-24, 33-36, 53
+// Confirmed busy: 7,8 (I2C), 9-13 (I2S), 23 (GT911-RST), 25-32 (MIPI-DSI),
+//   35 (BOOT), 37,38 (USB-UART), 39-44 (SDMMC), 53 (AMP_EN)
 
-// GPIO aliases — update from schematic when available
 #define RG_GPIO_BTN_UP      GPIO_NUM_4
 #define RG_GPIO_BTN_DOWN    GPIO_NUM_5
 #define RG_GPIO_BTN_LEFT    GPIO_NUM_6
-#define RG_GPIO_BTN_RIGHT   GPIO_NUM_7
+#define RG_GPIO_BTN_RIGHT   GPIO_NUM_18  // was GPIO7 — remapped away from I2C SDA
 #define RG_GPIO_BTN_A       GPIO_NUM_0
 #define RG_GPIO_BTN_B       GPIO_NUM_1
-#define RG_GPIO_BTN_X       GPIO_NUM_10
-#define RG_GPIO_BTN_Y       GPIO_NUM_11
+#define RG_GPIO_BTN_X       GPIO_NUM_19  // was GPIO10 — remapped away from I2S WS
+#define RG_GPIO_BTN_Y       GPIO_NUM_20  // was GPIO11 — remapped away from I2S DSIN
 #define RG_GPIO_BTN_START   GPIO_NUM_2
 #define RG_GPIO_BTN_SELECT  GPIO_NUM_3
 // GPIO_NUM_35 is the on-board BOOT button (active-low, no external pull-up needed)
 #define RG_GPIO_BTN_MENU    GPIO_NUM_35
-#define RG_GPIO_BTN_L       GPIO_NUM_12
-#define RG_GPIO_BTN_R       GPIO_NUM_13
+#define RG_GPIO_BTN_L       GPIO_NUM_21  // was GPIO12 — remapped away from I2S BCLK
+#define RG_GPIO_BTN_R       GPIO_NUM_22  // was GPIO13 — remapped away from I2S MCLK
 
 #define RG_GAMEPAD_GPIO_MAP {                                              \
     {RG_KEY_UP,     .num = RG_GPIO_BTN_UP,     .pullup = 1, .level = 0}, \
@@ -54,9 +63,45 @@
     {RG_KEY_R,      .num = RG_GPIO_BTN_R,      .pullup = 1, .level = 0}, \
 }
 
-// Virtual combo: START+SELECT also triggers MENU (useful before physical MENU wire is confirmed)
+// Virtual combo: START+SELECT also triggers MENU (two-finger touch or physical combo)
 #define RG_GAMEPAD_VIRT_MAP {                              \
     {RG_KEY_MENU, .src = RG_KEY_START | RG_KEY_SELECT},   \
+}
+
+// --- I2C (shared bus: GT911 touch + ES8311 audio codec) ---
+// Pins confirmed from Waveshare EP44B BSP (BSP_I2C_SDA=7, BSP_I2C_SCL=8)
+#define RG_GPIO_I2C_SDA     GPIO_NUM_7
+#define RG_GPIO_I2C_SCL     GPIO_NUM_8
+
+// --- Touch overlay (Phase 6: GT911 capacitive touch → virtual gamepad) ---
+// 720×720 display divided into hit zones; all 14 retro-go keys mapped.
+// Layout (portrait, y=0 at top):
+//
+//   y   0.. 89   [L shoulder ←─────────]     [─────────── R shoulder]
+//   y 130..260   [  UP  ]                       [    X    ]
+//   y 260..410   [LEFT] [RIGHT]         [  Y  ] [  CTR  ] [  A  ]
+//   y 410..540   [ DOWN ]                       [    B    ]
+//   y 580..700   [SELECT] [MENU] [OPTION] [START]
+//
+#define RG_GAMEPAD_TOUCH_MAP {                                          \
+    /* Shoulder buttons — top strip */                                  \
+    {RG_KEY_L,      0,   0, 219,  89},                                  \
+    {RG_KEY_R,    501,   0, 719,  89},                                  \
+    /* D-pad */                                                         \
+    {RG_KEY_UP,   116, 130, 234, 260},                                  \
+    {RG_KEY_DOWN, 116, 410, 234, 540},                                  \
+    {RG_KEY_LEFT,   0, 260, 116, 410},                                  \
+    {RG_KEY_RIGHT, 234, 260, 350, 410},                                 \
+    /* Face buttons */                                                  \
+    {RG_KEY_X,    488, 130, 606, 260},                                  \
+    {RG_KEY_Y,    372, 260, 488, 410},                                  \
+    {RG_KEY_A,    606, 260, 719, 410},                                  \
+    {RG_KEY_B,    488, 410, 606, 540},                                  \
+    /* Navigation row — bottom bar */                                   \
+    {RG_KEY_SELECT,   0, 580, 179, 700},                                \
+    {RG_KEY_MENU,   180, 580, 359, 700},                                \
+    {RG_KEY_OPTION, 360, 580, 539, 700},                                \
+    {RG_KEY_START,  540, 580, 719, 700},                                \
 }
 
 // --- Storage ---

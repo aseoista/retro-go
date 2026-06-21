@@ -77,6 +77,13 @@ typedef struct
     uint32_t src;
 } rg_keymap_virt_t;
 
+// #define RG_GAMEPAD_TOUCH_MAP {{}, ...} to use capacitive touch zone driver (GT911)
+typedef struct
+{
+    rg_key_t key;
+    int x_min, y_min, x_max, y_max;  // hit zone in display pixels
+} rg_keymap_touch_t;
+
 // FIXME: Create a single unified keymap...
 // ...
 
