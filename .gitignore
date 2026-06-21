@@ -11,6 +11,7 @@ build/
 /sdkconfig
 /*/sdkconfig.old
 /*/sdkconfig
+/*/partitions.csv
 /*.fw
 /*.img
 /*.zip
