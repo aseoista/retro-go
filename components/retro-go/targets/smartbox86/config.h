@@ -2,10 +2,14 @@
 
 #define RG_TARGET_NAME "Smartbox 86 (ESP32-P4)"
 
-// --- Display (dummy until Phase 4) ---
-#define RG_SCREEN_DRIVER    2       // else-branch in rg_display.c → dummy driver
-#define RG_SCREEN_WIDTH     720
-#define RG_SCREEN_HEIGHT    720
+// --- Display (Phase 4: software MIPI-DSI driver) ---
+#define RG_SCREEN_DRIVER         10     // mipi_dsi.h (ST7703 720×720, BGR888)
+#define RG_SCREEN_WIDTH          720
+#define RG_SCREEN_HEIGHT         720
+// Partial updates require back-buffer to carry unchanged rows from prior frame.
+// With double-buffering each back-buffer is 2 frames old — disable to ensure
+// every row is redrawn before lcd_sync() flips the buffer.
+#define RG_SCREEN_PARTIAL_UPDATES  0
 
 // --- Audio (dummy until Phase 5; no internal DAC on P4) ---
 #define RG_AUDIO_USE_INT_DAC  0

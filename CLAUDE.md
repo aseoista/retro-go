@@ -113,8 +113,9 @@ Active porting effort on branch `esp32p4smartbox86`. Target hardware: Waveshare 
 | 0 | Target scaffold — compiles | Done |
 | 1 | Boots on hardware, serial output | Done |
 | 2 | GPIO button map | Done (tentative GPIOs) |
-| 3 | SD card storage | Next |
-| 4–9 | Display, audio, touch, PPA, OTA | Pending |
+| 3 | SD card storage | Done |
+| 4 | MIPI-DSI display (ST7703 720×720, BGR888) | Done (builds; needs hardware test) |
+| 5–9 | Audio, touch, PPA, OTA | Pending |
 
 ### Build and flash for smartbox86
 
@@ -175,7 +176,7 @@ Virtual combo: START+SELECT → MENU (fallback while physical MENU wire is uncon
 
 - Flash mode: DIO + STR sampling (`CONFIG_ESPTOOLPY_FLASH_SAMPLE_MODE_STR=y`); QIO mode causes boot failure on P4
 - SDMMC: ESP32-P4 uses GPIO-matrix SDMMC; `rg_storage.c` uses `RG_GPIO_SDSPI_*` macros for CLK/CMD/D0 under `SOC_SDMMC_USE_GPIO_MATRIX`
-- Display driver: dummy (Phase 4 will add MIPI-DSI driver)
+- Display driver: MIPI-DSI software driver (`mipi_dsi.h`, driver 10) — ST7703 720×720 BGR888, double-buffered; needs hardware test
 - Audio driver: dummy (Phase 5 will add ES8311 I2S codec driver)
 
 ## Key Files
@@ -191,6 +192,8 @@ Virtual combo: START+SELECT → MENU (fallback while physical MENU wire is uncon
 | `launcher/main/applications.c` | Emulator registry and ROM file scanning |
 | `tools/gen_images.py` | Converts PNG theme assets to compiled C arrays |
 | `tools/patches/` | Required ESP-IDF patches |
+| `components/retro-go/drivers/display/mipi_dsi.h` | Phase 4: MIPI-DSI display driver (ESP32-P4 / Waveshare EP44B) |
+| `components/esp_lcd_st7703/` | Local copy of Waveshare ST7703 panel driver (no BSP/LVGL dependency) |
 
 ## Theme & Localization
 

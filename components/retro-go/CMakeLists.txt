@@ -8,6 +8,12 @@ else() # esp-idf 4.1 - 4.4
     set(COMPONENT_REQUIRES "spi_flash fatfs app_update esp_adc_cal json nvs_flash esp_wifi esp_http_client")
 endif()
 
+# ESP32-P4 MIPI-DSI display driver needs esp_lcd + LDO regulator + ST7703 panel driver
+if(IDF_TARGET STREQUAL "esp32p4")
+    # esp_ldo_regulator lives inside esp_hw_support in IDF 5.4
+    list(APPEND COMPONENT_REQUIRES esp_lcd esp_hw_support esp_lcd_st7703)
+endif()
+
 register_component()
 
 # Small size is preferred because of the small cache and most things here aren't performance sensitive!
