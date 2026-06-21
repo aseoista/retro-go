@@ -43,6 +43,69 @@ static rg_keymap_touch_t keymap_touch[] = RG_GAMEPAD_TOUCH_MAP;
 #include "drivers/input/gt911.h"
 static bool s_touch_active = false;
 #endif
+
+void rg_input_debug_touch_zones(int duration_ms)
+{
+#ifdef RG_GAMEPAD_TOUCH_MAP
+    static const struct { rg_key_t key; rg_color_t color; } zone_colors[] = {
+        {RG_KEY_UP,     C_CYAN},    {RG_KEY_DOWN,   C_CYAN},
+        {RG_KEY_LEFT,   C_CYAN},    {RG_KEY_RIGHT,  C_CYAN},
+        {RG_KEY_A,      C_GREEN},   {RG_KEY_B,      C_GREEN},
+        {RG_KEY_X,      C_GREEN},   {RG_KEY_Y,      C_GREEN},
+        {RG_KEY_L,      C_YELLOW},  {RG_KEY_R,      C_YELLOW},
+        {RG_KEY_START,  C_ORANGE},  {RG_KEY_SELECT, C_ORANGE},
+        {RG_KEY_MENU,   C_ORANGE},  {RG_KEY_OPTION, C_ORANGE},
+    };
+
+    rg_surface_t *surface = rg_surface_create(RG_SCREEN_WIDTH, RG_SCREEN_HEIGHT, RG_PIXEL_565_LE, MEM_SLOW);
+    if (!surface)
+        return;
+
+    int64_t deadline = rg_system_timer() + (int64_t)duration_ms * 1000;
+
+    while (rg_system_timer() < deadline) {
+        uint32_t touched_keys = 0;
+        if (s_touch_active) {
+            gt911_pt_t pts[GT911_MAX_POINTS];
+            int n = gt911_get_touches(pts, GT911_MAX_POINTS);
+            for (int t = 0; t < n; t++) {
+                for (size_t i = 0; i < RG_COUNT(keymap_touch); i++) {
+                    const rg_keymap_touch_t *z = &keymap_touch[i];
+                    if (pts[t].x >= (uint16_t)z->x_min && pts[t].x <= (uint16_t)z->x_max &&
+                        pts[t].y >= (uint16_t)z->y_min && pts[t].y <= (uint16_t)z->y_max)
+                        touched_keys |= z->key;
+                }
+            }
+        }
+
+        rg_surface_fill(surface, NULL, C_BLACK);
+        rg_gui_set_surface(surface);
+
+        for (size_t i = 0; i < RG_COUNT(keymap_touch); i++) {
+            const rg_keymap_touch_t *z = &keymap_touch[i];
+            rg_color_t color = C_WHITE;
+            for (size_t j = 0; j < RG_COUNT(zone_colors); j++) {
+                if (zone_colors[j].key == z->key) { color = zone_colors[j].color; break; }
+            }
+            bool active = (touched_keys & z->key) != 0;
+            int zw = z->x_max - z->x_min;
+            int zh = z->y_max - z->y_min;
+            rg_gui_draw_rect(z->x_min, z->y_min, zw, zh, 2, color, active ? color : C_TRANSPARENT);
+            rg_gui_draw_text(z->x_min, z->y_min + zh / 2 - 6, zw,
+                             rg_input_get_key_name(z->key),
+                             active ? C_BLACK : color, C_TRANSPARENT, RG_TEXT_ALIGN_CENTER);
+        }
+
+        rg_gui_set_surface(NULL);
+        rg_display_submit(surface, 0);
+        rg_task_delay(50);
+    }
+
+    rg_surface_free(surface);
+#else
+    (void)duration_ms;
+#endif
+}
 static bool input_task_running = false;
 static uint32_t gamepad_state = -1; // _Atomic
 static uint32_t gamepad_mapped = 0;

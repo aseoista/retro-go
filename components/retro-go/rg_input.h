@@ -95,6 +95,7 @@ typedef struct
     bool charging;
 } rg_battery_t;
 
+void rg_input_debug_touch_zones(int duration_ms); // no-op without RG_GAMEPAD_TOUCH_MAP
 void rg_input_init(void);
 void rg_input_deinit(void);
 bool rg_input_key_is_present(rg_key_t mask);

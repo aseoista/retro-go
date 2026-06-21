@@ -194,6 +194,7 @@ static void retro_loop(void)
     tab_t *tab = NULL;
     int64_t next_repeat = 0;
     int64_t next_idle_event = 0;
+    int64_t menu_held_since = 0;
     int repeats = 0;
     int joystick, prev_joystick;
     int change_tab = 0;
@@ -243,6 +244,27 @@ static void retro_loop(void)
                 joystick = gui.joystick;
                 repeats++;
                 next_repeat = rg_system_timer() + 400000 / (repeats + 1);
+            }
+        }
+
+        // MENU long-press (2 s, MENU alone) → touch debug overlay; short press → normal action.
+        // Intercept MENU before the normal handler so the about-menu doesn't open on press.
+        if ((gui.joystick & RG_KEY_MENU) && !(prev_joystick & RG_KEY_MENU))
+            menu_held_since = rg_system_timer(); // press start
+
+        if (menu_held_since) {
+            joystick &= ~RG_KEY_MENU; // suppress while tracking
+            if (!(gui.joystick & RG_KEY_MENU)) {
+                // Released before threshold — fire normal short-press action
+                joystick |= RG_KEY_MENU;
+                menu_held_since = 0;
+            } else if (gui.joystick == RG_KEY_MENU &&
+                       rg_system_timer() - menu_held_since >= 2000000) {
+                // Long press — show touch zone overlay
+                menu_held_since = 0;
+                rg_input_wait_for_key(RG_KEY_MENU, false, 3000);
+                rg_input_debug_touch_zones(3000);
+                redraw_pending = true;
             }
         }
 
