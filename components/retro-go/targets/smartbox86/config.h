@@ -61,15 +61,15 @@
 
 // --- Storage ---
 #define RG_STORAGE_ROOT          "/sd"
-#define RG_STORAGE_SDMMC_HOST    SDMMC_HOST_SLOT_1
+#define RG_STORAGE_SDMMC_HOST    SDMMC_HOST_SLOT_0
 #define RG_STORAGE_SDMMC_SPEED   SDMMC_FREQ_DEFAULT
 
-// ESP32-P4 uses a GPIO matrix for SDMMC; rg_storage.c assigns these via
-// slot_config.clk/.cmd/.d0 under SOC_SDMMC_USE_GPIO_MATRIX.
-// The macro names look like SPI names but are re-used for GPIO-matrix SDMMC.
-#define RG_GPIO_SDSPI_CLK        39
-#define RG_GPIO_SDSPI_CMD        40
-#define RG_GPIO_SDSPI_D0         41
+// Slot 0 IO MUX fixed pins: CLK=43, CMD=44, D0=39, D1=40, D2=41, D3=42.
+// Do NOT define RG_GPIO_SDSPI_CLK/CMD/D0 — keeping slot_config at SDMMC_SLOT_CONFIG_DEFAULT()
+// triggers the IO MUX fallback in the driver for Slot 0 on P4.
+// 4-bit mode is required so the driver drives D3 (GPIO42) HIGH before card init;
+// in 1-bit mode the driver skips D3 entirely, and the card may stay in SPI mode.
+#define RG_STORAGE_SDMMC_4BIT
 
 // --- Battery / power (USB-C board, no battery) ---
 #define RG_BATTERY_DRIVER 0

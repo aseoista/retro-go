@@ -113,7 +113,7 @@ Active porting effort on branch `esp32p4smartbox86`. Target hardware: Waveshare 
 | 0 | Target scaffold — compiles | Done |
 | 1 | Boots on hardware, serial output | Done |
 | 2 | GPIO button map | Done (tentative GPIOs) |
-| 3 | SD card storage | Done |
+| 3 | SD card storage (FATFS, 4-bit SDMMC) | Done |
 | 4 | MIPI-DSI display (ST7703 720×720, BGR888) | Done (builds; needs hardware test) |
 | 5–9 | Audio, touch, PPA, OTA | Pending |
 
@@ -175,7 +175,7 @@ Virtual combo: START+SELECT → MENU (fallback while physical MENU wire is uncon
 ### Target-specific notes
 
 - Flash mode: DIO + STR sampling (`CONFIG_ESPTOOLPY_FLASH_SAMPLE_MODE_STR=y`); QIO mode causes boot failure on P4
-- SDMMC: ESP32-P4 uses GPIO-matrix SDMMC; `rg_storage.c` uses `RG_GPIO_SDSPI_*` macros for CLK/CMD/D0 under `SOC_SDMMC_USE_GPIO_MATRIX`
+- SDMMC: Slot 0 IO MUX, CLK=43, CMD=44, D0=39, D1=40, D2=41, D3=42. **Must use 4-bit mode** (`RG_STORAGE_SDMMC_4BIT`): in 4-bit mode the driver drives D3 HIGH before card init; in 1-bit mode D3 is skipped and the card stays in SPI mode (no response). Do NOT define `RG_GPIO_SDSPI_CLK/CMD/D0`; `SDMMC_SLOT_CONFIG_DEFAULT()` already provides the IO MUX pin values and the driver falls back to IO MUX automatically for Slot 0 on P4. On first power-on the initial 20 MHz attempt may time-out; the 400 KHz retry succeeds and subsequent boots work at 20 MHz.
 - Display driver: MIPI-DSI software driver (`mipi_dsi.h`, driver 10) — ST7703 720×720 BGR888, double-buffered; needs hardware test
 - Audio driver: dummy (Phase 5 will add ES8311 I2S codec driver)
 

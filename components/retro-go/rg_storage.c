@@ -121,18 +121,30 @@ void rg_storage_init(void)
     RG_LOGI("Looking for SD Card using SDMMC...");
 
     sdmmc_host_t host_config = SDMMC_HOST_DEFAULT();
-    host_config.flags = SDMMC_HOST_FLAG_1BIT;
+    // SDMMC_HOST_FLAG_DEINIT_ARG must be kept (selects deinit_p over deinit in IDF 5.x).
+    // Only clear the width flags we don't want; don't replace flags wholesale.
+#if defined(RG_STORAGE_SDMMC_4BIT)
+    host_config.flags &= ~SDMMC_HOST_FLAG_8BIT;   // 4-bit max; keep DEINIT_ARG, DDR, etc.
+#else
+    host_config.flags &= ~(SDMMC_HOST_FLAG_8BIT | SDMMC_HOST_FLAG_4BIT | SDMMC_HOST_FLAG_DDR);
+#endif
     host_config.slot = RG_STORAGE_SDMMC_HOST;
     host_config.max_freq_khz = RG_STORAGE_SDMMC_SPEED;
     host_config.do_transaction = &sdcard_do_transaction;
 
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+#if defined(RG_STORAGE_SDMMC_4BIT)
+    slot_config.width = 4;
+#else
     slot_config.width = 1;
-#if SOC_SDMMC_USE_GPIO_MATRIX
+#endif
+// RG_GPIO_SDSPI_CLK is only defined when GPIO matrix routing is needed (e.g. Slot 1).
+// Without it, slot_config keeps the SDMMC_SLOT_CONFIG_DEFAULT() values (IO MUX pins for P4
+// Slot 0: CLK=43, CMD=44, D0=39) and the driver falls back to IO MUX automatically.
+#if SOC_SDMMC_USE_GPIO_MATRIX && defined(RG_GPIO_SDSPI_CLK)
     slot_config.clk = RG_GPIO_SDSPI_CLK;
     slot_config.cmd = RG_GPIO_SDSPI_CMD;
     slot_config.d0 = RG_GPIO_SDSPI_D0;
-    // d1 and d3 normally not used in width=1 but sdmmc_host_init_slot saves them, so just in case
     slot_config.d1 = slot_config.d3 = -1;
 #endif
 
