@@ -26,7 +26,7 @@
 #define MIPI_H              720
 #define MIPI_STRIDE         (MIPI_W * 3)       // bytes per row (BGR888)
 #define MIPI_FRAME_BYTES    ((size_t)MIPI_STRIDE * MIPI_H)
-#define MIPI_NUM_FB         2                  // double-buffered
+#define MIPI_NUM_FB         1                  // single-buffered (avoids per-rect flip corruption)
 
 #define LCD_BCKL_GPIO       GPIO_NUM_26        // PWM backlight
 #define LCD_RST_GPIO        GPIO_NUM_27        // panel reset (active-low)
@@ -38,7 +38,6 @@
 // ─── State ───────────────────────────────────────────────────────────────────
 static esp_lcd_panel_handle_t s_panel   = NULL;
 static uint8_t               *s_fb[MIPI_NUM_FB];
-static uint8_t                s_back_idx = 0;
 
 // Current write window (set by lcd_set_window)
 static int s_win_x = 0, s_win_y = 0, s_win_w = 0;
@@ -145,15 +144,17 @@ static void lcd_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
 
-    // Grab the two DMA framebuffers allocated by the DPI engine
+    // Grab the single DMA framebuffer allocated by the DPI engine
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(
-        s_panel, MIPI_NUM_FB, (void **)&s_fb[0], (void **)&s_fb[1]));
+        s_panel, MIPI_NUM_FB, (void **)&s_fb[0]));
 
-    // Clear both buffers to black before enabling the display
+    // Clear to black before enabling the display
     memset(s_fb[0], 0, MIPI_FRAME_BYTES);
-    memset(s_fb[1], 0, MIPI_FRAME_BYTES);
 
     esp_lcd_panel_disp_on_off(s_panel, true);
+
+    // Start continuous DMA scan from s_fb[0]; all subsequent writes are immediately visible.
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[0]);
 
     // Conversion scratch buffer — sized to hold one full lcd_buffer worth of pixels
     size_t initial_pixels = (size_t)MIPI_W * 4; // matches LCD_BUFFER_LENGTH
@@ -161,8 +162,8 @@ static void lcd_init(void)
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_conv_pixels = s_conv_buf ? initial_pixels : 0;
 
-    RG_LOGI("MIPI-DSI ready: %dx%d BGR888, %d FB @ %p / %p\n",
-            MIPI_W, MIPI_H, MIPI_NUM_FB, s_fb[0], s_fb[1]);
+    RG_LOGI("MIPI-DSI ready: %dx%d BGR888, %d FB @ %p\n",
+            MIPI_W, MIPI_H, MIPI_NUM_FB, s_fb[0]);
 }
 
 static void lcd_deinit(void)
@@ -204,14 +205,14 @@ static inline uint16_t *lcd_get_buffer(size_t length)
 // 'length' is always a multiple of s_win_w (one or more complete rows).
 static inline void lcd_send_buffer(uint16_t *buf, size_t length)
 {
-    if (!length || !s_fb[s_back_idx] || s_win_w <= 0 || s_write_y >= MIPI_H)
+    if (!length || !s_fb[0] || s_win_w <= 0 || s_write_y >= MIPI_H)
         return;
 
     int rows = (int)(length / (size_t)s_win_w);
     if (rows <= 0)
         return;
 
-    uint8_t *fb = s_fb[s_back_idx];
+    uint8_t *fb = s_fb[0];
 
     for (int r = 0; r < rows && s_write_y < MIPI_H; r++, s_write_y++) {
         const uint16_t *src = buf + (size_t)r * s_win_w;
@@ -232,13 +233,12 @@ static inline void lcd_send_buffer(uint16_t *buf, size_t length)
     }
 }
 
-// Called after each complete frame — flip back-buffer to display at next VSYNC
+// Single-buffer: DPI engine scans s_fb[0] continuously after init.
+// draw_bitmap is called idempotently so the DMA pointer stays valid.
 static void lcd_sync(void)
 {
-    if (s_panel) {
-        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[s_back_idx]);
-        s_back_idx ^= 1;
-    }
+    if (s_panel)
+        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[0]);
 }
 
 static const rg_display_driver_t rg_display_driver_mipi_dsi = {

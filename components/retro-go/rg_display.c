@@ -577,18 +577,21 @@ void rg_display_write_rect(int left, int top, int width, int height, int stride,
 void rg_display_clear_rect(int left, int top, int width, int height, uint16_t color_le)
 {
     const uint16_t color_be = (color_le << 8) | (color_le >> 8);
-    int pixels_remaining = width * height;
-    if (pixels_remaining > 0)
+    if (width > 0 && height > 0)
     {
         lcd_set_window(left + display.screen.margins.left, top + display.screen.margins.top, width, height);
-        while (pixels_remaining > 0)
+        int rows_remaining = height;
+        while (rows_remaining > 0)
         {
+            // Chunk by whole rows so lcd_send_buffer never receives a partial row.
+            // LCD_BUFFER_LENGTH = RG_SCREEN_WIDTH * 4 >= width * 4 > width, so rows >= 1 always.
+            int rows = RG_MIN(LCD_BUFFER_LENGTH / width, rows_remaining);
+            int pixels = rows * width;
             uint16_t *buffer = lcd_get_buffer(LCD_BUFFER_LENGTH);
-            int pixels = RG_MIN(pixels_remaining, LCD_BUFFER_LENGTH);
             for (size_t j = 0; j < pixels; ++j)
                 buffer[j] = color_be;
             lcd_send_buffer(buffer, pixels);
-            pixels_remaining -= pixels;
+            rows_remaining -= rows;
         }
     }
 }
