@@ -25,6 +25,14 @@ static void lcd_sync(void)
 {
 }
 
+static void lcd_set_rotation(int rotation)
+{
+}
+
+static void lcd_set_window(int left, int top, int width, int height)
+{
+}
+
 const rg_display_driver_t rg_display_driver_dummy = {
     .name = "dummy",
 };

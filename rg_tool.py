@@ -120,9 +120,12 @@ def build_app(app, device_type, with_profiling=False, no_networking=False, is_re
     args.append(f"-DRG_BUILD_RELEASE={1 if is_release else 0}")
     args.append(f"-DRG_ENABLE_PROFILING={1 if with_profiling else 0}")
     args.append(f"-DRG_ENABLE_NETWORKING={0 if no_networking else 1}")
-    with open("partitions.csv", "w") as f:
-        f.write("# This table isn't used, it's just needed to avoid esp-idf build failures.\n")
-        f.write("dummy, app, ota_0, 65536, 3145728\n")
+    # IDF 5.x resolves CONFIG_PARTITION_TABLE_CUSTOM_FILENAME relative to the app project dir,
+    # not the repo root. Write the dummy CSV there so the build finds it.
+    for csv_path in ["partitions.csv", os.path.join(app, "partitions.csv")]:
+        with open(csv_path, "w") as f:
+            f.write("# This table isn't used, it's just needed to avoid esp-idf build failures.\n")
+            f.write("dummy, app, ota_0, 65536, 3145728\n")
     run(args, cwd=os.path.join(os.getcwd(), app))
     print("Done.\n")
 
