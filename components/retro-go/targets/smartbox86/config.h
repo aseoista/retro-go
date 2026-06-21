@@ -31,10 +31,8 @@
 #define RG_GPIO_BTN_SELECT  GPIO_NUM_3
 // GPIO_NUM_35 is the on-board BOOT button (active-low, no external pull-up needed)
 #define RG_GPIO_BTN_MENU    GPIO_NUM_35
-// Volume-/+ reuse RG_KEY_L/R — retro-go has no dedicated volume key;
-// emulators that need real L/R shoulder buttons can use touch overlay (Phase 6).
-#define RG_GPIO_BTN_VOL_DN  GPIO_NUM_12
-#define RG_GPIO_BTN_VOL_UP  GPIO_NUM_13
+#define RG_GPIO_BTN_L       GPIO_NUM_12
+#define RG_GPIO_BTN_R       GPIO_NUM_13
 
 #define RG_GAMEPAD_GPIO_MAP {                                              \
     {RG_KEY_UP,     .num = RG_GPIO_BTN_UP,     .pullup = 1, .level = 0}, \
@@ -48,8 +46,8 @@
     {RG_KEY_START,  .num = RG_GPIO_BTN_START,  .pullup = 1, .level = 0}, \
     {RG_KEY_SELECT, .num = RG_GPIO_BTN_SELECT, .pullup = 1, .level = 0}, \
     {RG_KEY_MENU,   .num = RG_GPIO_BTN_MENU,   .pullup = 0, .level = 0}, \
-    {RG_KEY_L,      .num = RG_GPIO_BTN_VOL_DN, .pullup = 1, .level = 0}, \
-    {RG_KEY_R,      .num = RG_GPIO_BTN_VOL_UP, .pullup = 1, .level = 0}, \
+    {RG_KEY_L,      .num = RG_GPIO_BTN_L,      .pullup = 1, .level = 0}, \
+    {RG_KEY_R,      .num = RG_GPIO_BTN_R,      .pullup = 1, .level = 0}, \
 }
 
 // Virtual combo: START+SELECT also triggers MENU (useful before physical MENU wire is confirmed)
