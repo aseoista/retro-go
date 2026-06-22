@@ -11,10 +11,21 @@
 // every row is redrawn before lcd_sync() flips the buffer.
 #define RG_SCREEN_PARTIAL_UPDATES  0
 
-// --- Audio (dummy until Phase 5; no internal DAC on P4) ---
+// --- Audio (Phase 5: ES8311 codec via I2S + I2C) ---
+// No internal DAC on ESP32-P4; use ES8311 codec chip via I2S.
+// I2C bus (SDA=7, SCL=8) is shared with GT911 touch; rg_i2c initializes it.
 #define RG_AUDIO_USE_INT_DAC  0
-#define RG_AUDIO_USE_EXT_DAC  0
+#define RG_AUDIO_USE_EXT_DAC  0     // legacy i2s.c driver not used on P4
 #define RG_AUDIO_USE_SDL2     0
+#define RG_AUDIO_USE_ES8311   1     // es8311.c driver (IDF 5.x i2s_std)
+
+// I2S pins (confirmed from Waveshare EP44B BSP)
+#define RG_GPIO_SND_MCLK          GPIO_NUM_13
+#define RG_GPIO_SND_I2S_BCK       GPIO_NUM_12
+#define RG_GPIO_SND_I2S_WS        GPIO_NUM_10
+#define RG_GPIO_SND_I2S_DATA      GPIO_NUM_9
+// NS4150B power amplifier enable (active HIGH)
+#define RG_GPIO_SND_AMP_ENABLE    GPIO_NUM_53
 
 // --- Input ---
 // Physical GPIO buttons (Phase 2, tentative — must re-verify against schematic)
