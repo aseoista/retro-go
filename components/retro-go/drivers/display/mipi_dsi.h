@@ -422,7 +422,7 @@ static void lcd_submit_surface(const rg_surface_t *surface)
         .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
         .scale_x        = scale_x,
         .scale_y        = scale_y,
-        .rgb_swap       = true,
+        .rgb_swap       = false,
         .byte_swap      = src_byte_swap,
         .mode           = PPA_TRANS_MODE_BLOCKING,
     };
