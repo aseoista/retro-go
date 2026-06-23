@@ -117,7 +117,8 @@ Active porting effort on branch `esp32p4smartbox86`. Target hardware: Waveshare 
 | 4 | MIPI-DSI display (ST7703 720×720, BGR888) | Done (builds; needs hardware test) |
 | 5 | Audio (ES8311 + I2S) | Done (builds; needs hardware test) |
 | 6 | Touch overlay (GT911 → virtual gamepad) | Done (builds; needs hardware test) |
-| 7–9 | PPA scaling, OTA, polish | Pending |
+| 7 | PPA hardware-accelerated scaling (SRM) | Done (builds; needs hardware test) |
+| 8–9 | OTA, polish | Pending |
 
 ### Build and flash for smartbox86
 
@@ -199,7 +200,7 @@ Virtual combo: START+SELECT → MENU (two-finger touch or physical button combo)
 | `launcher/main/applications.c` | Emulator registry and ROM file scanning |
 | `tools/gen_images.py` | Converts PNG theme assets to compiled C arrays |
 | `tools/patches/` | Required ESP-IDF patches |
-| `components/retro-go/drivers/display/mipi_dsi.h` | Phase 4: MIPI-DSI display driver (ESP32-P4 / Waveshare EP44B) |
+| `components/retro-go/drivers/display/mipi_dsi.h` | Phases 4+7: MIPI-DSI display driver + PPA SRM scaling (ESP32-P4 / Waveshare EP44B) |
 | `components/retro-go/drivers/audio/es8311.c` | Phase 5: ES8311 codec driver — IDF 5.x i2s_std + rg_i2c register writes |
 | `components/retro-go/drivers/input/gt911.h` | Phase 6: GT911 touch driver — raw I2C polling, no BSP dependency |
 | `components/esp_lcd_st7703/` | Local copy of Waveshare ST7703 panel driver (no BSP/LVGL dependency) |

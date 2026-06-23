@@ -368,7 +368,11 @@ static void display_task(void *arg)
             display.changed = false;
         }
 
+#ifdef LCD_HAS_PPA_SUBMIT
+        lcd_submit_surface(msg.dataPtr);
+#else
         write_update(msg.dataPtr);
+#endif
         // draw_on_screen_display(0, display.screen.height);
         rg_task_receive(&msg);
 

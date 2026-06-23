@@ -84,6 +84,10 @@ static void lcd_set_backlight(float percent)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 
+// Forward declarations for Phase 7 PPA helpers (defined after lcd_init/deinit)
+static void ppa_init(void);
+static void ppa_deinit(void);
+
 // ─── Panel init / deinit ─────────────────────────────────────────────────────
 
 static void lcd_init(void)
@@ -164,10 +168,13 @@ static void lcd_init(void)
 
     RG_LOGI("MIPI-DSI ready: %dx%d BGR888, %d FB @ %p\n",
             MIPI_W, MIPI_H, MIPI_NUM_FB, s_fb[0]);
+
+    ppa_init();
 }
 
 static void lcd_deinit(void)
 {
+    ppa_deinit();
     lcd_set_backlight(0);
     if (s_panel)
         esp_lcd_panel_disp_on_off(s_panel, false);
@@ -244,3 +251,181 @@ static void lcd_sync(void)
 static const rg_display_driver_t rg_display_driver_mipi_dsi = {
     .name = "mipi_dsi",
 };
+
+// ─── Phase 7: PPA hardware-accelerated scaling ────────────────────────────────
+//
+// lcd_submit_surface() replaces write_update() in display_task() for the MIPI-DSI
+// driver.  One blocking PPA SRM operation does:
+//   RGB565 source (native emulator resolution)
+//   → bilinear scale to the viewport dimensions
+//   → BGR888 in the display framebuffer
+//
+// Scale factors are quantised to PPA's 1/16 steps (same approach as p3a).
+//
+// Palette formats (RG_PIXEL_PAL565_BE / _LE) are expanded to a PSRAM staging
+// buffer first, then fed to PPA as plain RGB565.
+
+#include "driver/ppa.h"
+
+#define LCD_HAS_PPA_SUBMIT  1
+
+static ppa_client_handle_t s_ppa_srm     = NULL;
+static uint16_t           *s_ppa_staging = NULL;   // PSRAM, palette expansion
+static size_t              s_ppa_stag_px = 0;       // capacity in pixels
+
+static void ppa_init(void)
+{
+    ppa_client_config_t cfg = {
+        .oper_type             = PPA_OPERATION_SRM,
+        .max_pending_trans_num = 1,
+    };
+    esp_err_t err = ppa_register_client(&cfg, &s_ppa_srm);
+    if (err != ESP_OK) {
+        RG_LOGE("PPA SRM init failed: %s\n", esp_err_to_name(err));
+        s_ppa_srm = NULL;
+    } else {
+        RG_LOGI("PPA SRM client ready\n");
+    }
+}
+
+static void ppa_deinit(void)
+{
+    if (s_ppa_srm) {
+        ppa_unregister_client(s_ppa_srm);
+        s_ppa_srm = NULL;
+    }
+    heap_caps_free(s_ppa_staging);
+    s_ppa_staging = NULL;
+    s_ppa_stag_px = 0;
+}
+
+// Submit one emulator frame via PPA SRM (scale + RGB565 → BGR888, hardware DMA).
+// Note: 'display' is the static rg_display_t in rg_display.c; it is visible here
+// because this header is #include'd into that file.
+static void lcd_submit_surface(const rg_surface_t *surface)
+{
+    RG_ASSERT(s_ppa_srm,  "PPA SRM client not initialised");
+    RG_ASSERT(s_fb[0],    "MIPI framebuffer not allocated");
+    RG_ASSERT(surface && surface->data, "NULL surface submitted to PPA");
+
+    int src_w = surface->width;
+    int src_h = surface->height;
+    RG_ASSERT(src_w > 0 && src_h > 0, "Surface has zero dimensions");
+
+    // Viewport geometry from rg_display.c statics
+    int vp_left = display.viewport.left;
+    int vp_top  = display.viewport.top;
+    int vp_w    = display.viewport.width;
+    int vp_h    = display.viewport.height;
+
+    // vp_w/h == 0 only before the first frame is configured; skip silently.
+    if (vp_w <= 0 || vp_h <= 0)
+        return;
+
+    // Negative viewport means SCALING_ZOOM with zoom > 1 (content larger than
+    // screen).  PPA cropping is not implemented; skip this frame.
+    if (vp_left < 0 || vp_top < 0) {
+        RG_LOGW("PPA: skipping cropped viewport (%d,%d) — use SCALING_FIT/FULL\n",
+                vp_left, vp_top);
+        return;
+    }
+
+    int dst_x = display.screen.margins.left + vp_left;
+    int dst_y = display.screen.margins.top  + vp_top;
+
+    // Quantise scale to PPA's 1/16 steps (truncate so output fits in viewport)
+    uint16_t qx = (uint16_t)((float)vp_w / (float)src_w * 16.0f);
+    uint16_t qy = (uint16_t)((float)vp_h / (float)src_h * 16.0f);
+    if (qx < 1) qx = 1;
+    if (qy < 1) qy = 1;
+    float scale_x = (float)qx / 16.0f;
+    float scale_y = (float)qy / 16.0f;
+
+    // Actual output dimensions after quantisation; centre within the viewport
+    int out_w = (int)((float)src_w * scale_x);
+    int out_h = (int)((float)src_h * scale_y);
+    int out_x = dst_x + (vp_w - out_w) / 2;
+    int out_y = dst_y + (vp_h - out_h) / 2;
+
+    RG_ASSERT(out_x >= 0 && out_y >= 0 &&
+              (out_x + out_w) <= MIPI_W && (out_y + out_h) <= MIPI_H,
+              "PPA output region outside framebuffer — viewport mismatch");
+
+    // ── Prepare PPA source buffer ──────────────────────────────────────────
+    const void          *src_buf;
+    uint32_t             src_pic_w;
+    ppa_srm_color_mode_t src_cm;
+    bool                 src_byte_swap;
+
+    int format = surface->format;
+
+    if (format & RG_PIXEL_PALETTE) {
+        // Expand 8-bit palette → RGB565 LE in PSRAM staging buffer
+        size_t need_px = (size_t)src_w * src_h;
+        if (need_px > s_ppa_stag_px) {
+            heap_caps_free(s_ppa_staging);
+            // 64-byte alignment required by PPA for PSRAM sources
+            s_ppa_staging = heap_caps_aligned_alloc(
+                64, need_px * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            RG_ASSERT(s_ppa_staging, "PPA staging buffer allocation failed");
+            s_ppa_stag_px = need_px;
+        }
+        const uint8_t  *psrc = (const uint8_t *)surface->data + surface->offset;
+        const uint16_t *pal  = surface->palette;
+        for (int row = 0; row < src_h; row++) {
+            const uint8_t *row_in  = psrc + (size_t)row * surface->stride;
+            uint16_t      *row_out = s_ppa_staging + (size_t)row * src_w;
+            for (int col = 0; col < src_w; col++) {
+                // Palette entries are BE; convert to LE for PPA RGB565 input
+                uint16_t px = pal[row_in[col]];
+                row_out[col] = (uint16_t)((px << 8) | (px >> 8));
+            }
+        }
+        src_buf       = s_ppa_staging;
+        src_pic_w     = (uint32_t)src_w;
+        src_cm        = PPA_SRM_COLOR_MODE_RGB565;
+        src_byte_swap = false;  // already LE after expansion
+    } else {
+        RG_ASSERT(format == RG_PIXEL_565_LE || format == RG_PIXEL_565_BE,
+                  "Unsupported surface format for PPA");
+        // Use surface data directly; pic_w = stride / 2 handles row padding
+        src_buf       = (const uint8_t *)surface->data + surface->offset;
+        src_pic_w     = (uint32_t)(surface->stride / 2);
+        src_cm        = PPA_SRM_COLOR_MODE_RGB565;
+        // BE data stored [high_byte, low_byte]: byte_swap corrects LE word order
+        src_byte_swap = (format == RG_PIXEL_565_BE);
+    }
+
+    // ── PPA SRM: scale + RGB565 → BGR888 ──────────────────────────────────
+    // rgb_swap = true: PPA native output is [R,G,B]; swap gives [B,G,R] = BGR888
+    // which is what the ST7703 display expects (confirmed in Phase 4).
+    ppa_srm_oper_config_t srm = {
+        .in = {
+            .buffer         = src_buf,
+            .pic_w          = src_pic_w,
+            .pic_h          = (uint32_t)src_h,
+            .block_w        = (uint32_t)src_w,
+            .block_h        = (uint32_t)src_h,
+            .block_offset_x = 0,
+            .block_offset_y = 0,
+            .srm_cm         = src_cm,
+        },
+        .out = {
+            .buffer         = s_fb[0],
+            .buffer_size    = MIPI_FRAME_BYTES,
+            .pic_w          = MIPI_W,
+            .pic_h          = MIPI_H,
+            .block_offset_x = (uint32_t)out_x,
+            .block_offset_y = (uint32_t)out_y,
+            .srm_cm         = PPA_SRM_COLOR_MODE_RGB888,
+        },
+        .rotation_angle = PPA_SRM_ROTATION_ANGLE_0,
+        .scale_x        = scale_x,
+        .scale_y        = scale_y,
+        .rgb_swap       = true,
+        .byte_swap      = src_byte_swap,
+        .mode           = PPA_TRANS_MODE_BLOCKING,
+    };
+
+    ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(s_ppa_srm, &srm));
+}
