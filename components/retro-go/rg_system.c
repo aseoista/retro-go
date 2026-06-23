@@ -443,7 +443,11 @@ rg_app_t *rg_system_init(int sampleRate, const rg_handlers_t *handlers, void *_u
     showCrashDialog = (r_reason == ESP_RST_PANIC); // || r_reason == ESP_RST_TASK_WDT ||
                        // r_reason == ESP_RST_INT_WDT || r_reason == ESP_RST_WDT);
     app.isColdBoot = r_reason != ESP_RST_SW;
-    tasks[0] = (rg_task_t){.handle = xTaskGetCurrentTaskHandle(), .name = "main"};
+    tasks[0] = (rg_task_t){
+        .handle = xTaskGetCurrentTaskHandle(),
+        .queue  = xQueueCreate(4, sizeof(rg_task_msg_t)),
+        .name   = "main",
+    };
 #elif defined(RG_TARGET_SDL2)
     tasks[0] = (rg_task_t){.handle = SDL_ThreadID(), .name = "main"};
 #endif

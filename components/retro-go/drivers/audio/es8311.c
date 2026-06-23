@@ -214,7 +214,7 @@ static bool es_i2s_init(int rate)
     i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan.auto_clear    = true;
     chan.dma_desc_num  = 4;
-    chan.dma_frame_num = 180;
+    chan.dma_frame_num = 480; // 1920 samples total — enough headroom to avoid blocking per-frame submit
 
     if (i2s_new_channel(&chan, &s_tx, NULL) != ESP_OK) {
         s_error = "i2s_new_channel failed";

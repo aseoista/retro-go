@@ -69,7 +69,8 @@ static const char *SNES_BUTTONS[] = {
 static rg_app_t *app;
 static rg_surface_t *updates[2];
 static rg_surface_t *currentUpdate;
-static rg_audio_sample_t *audioBuffer;
+static rg_audio_sample_t audioBuffers[2][AUDIO_BUFFER_LENGTH];
+static rg_task_t *snesAudioTask = NULL;
 
 static bool apu_enabled = true;
 static bool lowpass_filter = false;
@@ -279,8 +280,8 @@ static void S9xAudioCallback(void)
 {
     S9xFinalizeSamples();
     size_t available_samples = S9xGetSampleCount();
-    S9xMixSamples((void *)audioBuffer, available_samples);
-    rg_audio_submit(audioBuffer, available_samples >> 1);
+    S9xMixSamples((void *)audioBuffers[0], available_samples);
+    rg_audio_submit(audioBuffers[0], available_samples >> 1);
 }
 #endif
 
@@ -290,6 +291,19 @@ static void options_handler(rg_gui_option_t *dest)
     *dest++ = (rg_gui_option_t){0, _("Audio filter"), "-", RG_DIALOG_FLAG_NORMAL, &lowpass_filter_cb};
     *dest++ = (rg_gui_option_t){0, _("Controls"),     "-", RG_DIALOG_FLAG_NORMAL, &menu_keymap_cb};
     *dest++ = (rg_gui_option_t)RG_DIALOG_END;
+}
+
+static void snes_audio_task_func(void *arg)
+{
+    rg_task_t *mainTask = (rg_task_t *)arg;
+    rg_task_msg_t msg;
+    while (rg_task_receive(&msg))
+    {
+        if (msg.type == RG_TASK_MSG_STOP)
+            break;
+        rg_audio_submit(audioBuffers[msg.dataInt & 1], (int)(msg.dataInt >> 1));
+        rg_task_send(mainTask, &(rg_task_msg_t){.type = 0});
+    }
 }
 
 void snes_main(void)
@@ -309,8 +323,6 @@ void snes_main(void)
     updates[0] = rg_surface_create(SNES_WIDTH, SNES_HEIGHT_EXTENDED, RG_PIXEL_565_LE, 0);
     updates[0]->height = SNES_HEIGHT;
     currentUpdate = updates[0];
-
-    audioBuffer = (rg_audio_sample_t *)malloc(AUDIO_BUFFER_LENGTH * 4);
 
     update_keymap(rg_settings_get_number(NS_APP, SETTING_KEYMAP, 0));
 
@@ -364,11 +376,20 @@ void snes_main(void)
     }
 
     rg_system_set_tick_rate(Memory.ROMFramesPerSecond);
+    int samplesPerFrame = AUDIO_SAMPLE_RATE / Memory.ROMFramesPerSecond;
     app->frameskip = 3;
+
+    rg_task_t *mainTask = rg_task_current();
+    snesAudioTask = rg_task_create("snes_audio", snes_audio_task_func, mainTask, 4096, RG_TASK_PRIORITY_2, 1);
 
     bool menuCancelled = false;
     bool menuPressed = false;
     int skipFrames = 0;
+    int audioWriteBuf = 0;
+    bool audioSubmitted = false;
+
+    static int64_t prof_acc_emu, prof_acc_mix, prof_acc_audio, prof_acc_sleep, prof_acc_loop;
+    static int64_t prof_ticks;
 
     while (1)
     {
@@ -395,7 +416,7 @@ void snes_main(void)
             menuCancelled = true;
         }
 
-        int64_t startTime = rg_system_timer();
+        int64_t tA = rg_system_timer();
         bool drawFrame = (skipFrames == 0);
         bool slowFrame = false;
 
@@ -403,6 +424,17 @@ void snes_main(void)
         GFX.Screen = currentUpdate->data;
 
         S9xMainLoop();
+
+        // Wait for the previous frame's audio submit to finish before writing to its buffer.
+        // By the time S9xMainLoop (≥18ms) returns, the 3ms submit from last frame is long done.
+        if (audioSubmitted)
+        {
+            rg_task_msg_t doneMsg;
+            rg_task_receive(&doneMsg);
+            audioSubmitted = false;
+        }
+
+        int64_t tB = rg_system_timer();
 
         if (drawFrame)
         {
@@ -412,28 +444,57 @@ void snes_main(void)
 
     #ifndef USE_BLARGG_APU
         if (apu_enabled && lowpass_filter)
-            S9xMixSamplesLowPass((void *)audioBuffer, AUDIO_BUFFER_LENGTH << 1, AUDIO_LOW_PASS_RANGE);
+            S9xMixSamplesLowPass((void *)audioBuffers[audioWriteBuf], samplesPerFrame << 1, AUDIO_LOW_PASS_RANGE);
         else if (apu_enabled)
-            S9xMixSamples((void *)audioBuffer, AUDIO_BUFFER_LENGTH << 1);
+            S9xMixSamples((void *)audioBuffers[audioWriteBuf], samplesPerFrame << 1);
     #endif
+        int64_t tC = rg_system_timer();
 
-        rg_system_tick(rg_system_timer() - startTime);
+        rg_system_tick(tC - tA);
 
     #ifndef USE_BLARGG_APU
-        if (apu_enabled)
-            rg_audio_submit(audioBuffer, AUDIO_BUFFER_LENGTH);
+        if (apu_enabled && snesAudioTask)
+        {
+            rg_task_send(snesAudioTask, &(rg_task_msg_t){
+                .type = 1,
+                .dataInt = ((uint32_t)samplesPerFrame << 1) | (uint32_t)audioWriteBuf,
+            });
+            audioWriteBuf ^= 1;
+            audioSubmitted = true;
+        }
     #endif
+        int64_t tD = rg_system_timer();
 
         // Cap at 100% speed: sleep any remaining frame time
         {
-            int64_t elapsed = rg_system_timer() - startTime;
-            if (elapsed < app->frameTime)
-                rg_usleep(app->frameTime - elapsed);
+            //int64_t elapsed = tD - tA;
+            //if (elapsed < app->frameTime)
+            //    rg_usleep(app->frameTime - elapsed);
         }
+        int64_t tE = rg_system_timer();
+
+        prof_acc_emu   += tB - tA;
+        prof_acc_mix   += tC - tB;
+        prof_acc_audio += tD - tC;
+        prof_acc_sleep += tE - tD;
+        prof_acc_loop  += tE - tA;
+
+        if (++prof_ticks >= app->tickRate)
+        {
+            RG_LOGI("PROF emu=%d mix=%d audio=%d sleep=%d loop=%d us/tick\n",
+                (int)(prof_acc_emu   / prof_ticks),
+                (int)(prof_acc_mix   / prof_ticks),
+                (int)(prof_acc_audio / prof_ticks),
+                (int)(prof_acc_sleep / prof_ticks),
+                (int)(prof_acc_loop  / prof_ticks));
+            prof_acc_emu = prof_acc_mix = prof_acc_audio = prof_acc_sleep = prof_acc_loop = prof_ticks = 0;
+        }
+
+        int64_t startTime = tA; // kept for skip-frame elapsed check below
 
         if (skipFrames == 0)
         {
-            int elapsed = rg_system_timer() - startTime;
+            int elapsed = (int)(tE - startTime);
             if (app->frameskip > 0)
                 skipFrames = app->frameskip;
             else if (elapsed > app->frameTime + 1500) // Allow some jitter
