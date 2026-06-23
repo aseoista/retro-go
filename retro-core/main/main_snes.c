@@ -424,6 +424,13 @@ void snes_main(void)
             rg_audio_submit(audioBuffer, AUDIO_BUFFER_LENGTH);
     #endif
 
+        // Cap at 100% speed: sleep any remaining frame time
+        {
+            int64_t elapsed = rg_system_timer() - startTime;
+            if (elapsed < app->frameTime)
+                rg_usleep(app->frameTime - elapsed);
+        }
+
         if (skipFrames == 0)
         {
             int elapsed = rg_system_timer() - startTime;
