@@ -14,6 +14,7 @@ typedef struct
 } keymap_t;
 
 static const keymap_t KEYMAPS[] = {
+#ifndef RG_TARGET_SMARTBOX86
 	{"Type A", {
 		{SNES_A_MASK, RG_KEY_A, 0},
 		{SNES_B_MASK, RG_KEY_B, 0},
@@ -56,6 +57,37 @@ static const keymap_t KEYMAPS[] = {
 		{SNES_LEFT_MASK, RG_KEY_LEFT, 0},
 		{SNES_RIGHT_MASK, RG_KEY_RIGHT, 0},
 	}},
+#else // RG_TARGET_SMARTBOX86
+    {"Type A", {
+		{SNES_A_MASK, RG_KEY_A, 0},
+		{SNES_B_MASK, RG_KEY_B, 0},
+		{SNES_X_MASK, RG_KEY_X, 0},
+		{SNES_Y_MASK, RG_KEY_Y, 0},
+		{SNES_TL_MASK, RG_KEY_L, 0},
+		{SNES_TR_MASK, RG_KEY_R, 0},
+		{SNES_START_MASK, RG_KEY_START, 0},
+		{SNES_SELECT_MASK, RG_KEY_SELECT, 0},
+		{SNES_UP_MASK, RG_KEY_UP, 0},
+		{SNES_DOWN_MASK, RG_KEY_DOWN, 0},
+		{SNES_LEFT_MASK, RG_KEY_LEFT, 0},
+		{SNES_RIGHT_MASK, RG_KEY_RIGHT, 0},
+	}},
+	{"Type B", {
+		{SNES_A_MASK, RG_KEY_X, 0},
+		{SNES_B_MASK, RG_KEY_A, 0},
+		{SNES_X_MASK, RG_KEY_Y, 0},
+		{SNES_Y_MASK, RG_KEY_B, 0},
+		{SNES_TL_MASK, RG_KEY_L, 0},
+		{SNES_TR_MASK, RG_KEY_R, 0},
+		{SNES_START_MASK, RG_KEY_START, 0},
+		{SNES_SELECT_MASK, RG_KEY_SELECT, 0},
+		{SNES_UP_MASK, RG_KEY_UP, 0},
+		{SNES_DOWN_MASK, RG_KEY_DOWN, 0},
+		{SNES_LEFT_MASK, RG_KEY_LEFT, 0},
+		{SNES_RIGHT_MASK, RG_KEY_RIGHT, 0},
+	}},
+#endif // #ifndef RG_TARGET_SMARTBOX86
+
 };
 
 static const size_t KEYMAPS_COUNT = (sizeof(KEYMAPS) / sizeof(keymap_t));
