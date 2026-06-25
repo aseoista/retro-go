@@ -74,6 +74,7 @@ static const struct {
     { 32000, 0x10 },
     { 44100, 0x10 },
     { 48000, 0x10 },
+    { 65536, 0x10 },
 };
 
 static i2s_chan_handle_t s_tx       = NULL;

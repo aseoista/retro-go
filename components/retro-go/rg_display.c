@@ -370,6 +370,7 @@ static void display_task(void *arg)
 
 #ifdef LCD_HAS_PPA_SUBMIT
         lcd_submit_surface(msg.dataPtr);
+        counters.fullFrames++;
 #else
         write_update(msg.dataPtr);
 #endif

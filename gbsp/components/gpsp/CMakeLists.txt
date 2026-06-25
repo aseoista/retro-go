@@ -12,6 +12,7 @@ set(COMPONENT_SRCS
     rfu.c
     serial_proto.c
     gba_cc_lut.c
+    main_gpsp.c
     libretro/libretro.c
     libretro/libretro-common/compat/compat_posix_string.c
     libretro/libretro-common/compat/compat_strl.c
@@ -38,7 +39,6 @@ set(COMPONENT_REQUIRES "retro-go")
 register_component()
 
 target_compile_definitions(${COMPONENT_TARGET} PRIVATE
-    HAVE_DYNAREC=0
     THREADED_RENDERER=0
 )
 

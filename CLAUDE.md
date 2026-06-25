@@ -114,10 +114,10 @@ Active porting effort on branch `esp32p4smartbox86`. Target hardware: Waveshare 
 | 1 | Boots on hardware, serial output | Done |
 | 2 | GPIO button map | Done (GPIOs remapped — see table below) |
 | 3 | SD card storage (FATFS, 4-bit SDMMC) | Done |
-| 4 | MIPI-DSI display (ST7703 720×720, BGR888) | Done (builds; needs hardware test) |
+| 4 | MIPI-DSI display (ST7703 720×720, BGR888) | Done (hardware-verified via gbsp) |
 | 5 | Audio (ES8311 + I2S) | Done (builds; needs hardware test) |
 | 6 | Touch overlay (GT911 → virtual gamepad) | Done (builds; needs hardware test) |
-| 7 | PPA hardware-accelerated scaling (SRM) | Done (builds; needs hardware test) |
+| 7 | PPA hardware-accelerated scaling (SRM) | Done (hardware-verified: 45 FPS full-frame renders) |
 | 8–9 | OTA, polish | Pending |
 
 ### Build and flash for smartbox86
@@ -196,7 +196,7 @@ GBA emulation via the **libretro/gpsp** core (interpreter-only, no dynarec). Tar
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Scaffold — gpsp vendored, compiles, boots to RG_PANIC | Done |
-| 1 | ROM load + first frame | Pending |
+| 1 | ROM load + first frame | Done (running at ~45 FPS; not yet at 60 FPS target) |
 | 2 | Input | Pending |
 | 3 | Audio | Pending |
 | 4 | Save system (state + battery) | Pending |
@@ -210,7 +210,7 @@ gbsp/
 ├── CMakeLists.txt              # project(gbsp); COMPONENTS = "main retro-go gpsp"
 ├── main/
 │   ├── CMakeLists.txt
-│   └── main_gba.c              # retro-go ↔ libretro glue (stub for now)
+│   └── main_gba.c              # retro-go ↔ libretro glue
 └── components/
     └── gpsp/
         ├── CMakeLists.txt      # interpreter-only sources, HAVE_DYNAREC=0
@@ -234,6 +234,7 @@ esptool.py -p /dev/ttyACM0 -b 460800 --chip esp32p4 write_flash @flash_args
 - `main.c` (gpsp SDL frontend) and `cpu_threaded.c` (dynarec) are excluded from the build.
 - `libretro-common` subset vendored alongside gpsp: `compat/`, `encodings/`, `file/`, `streams/`, `string/`, `time/`, `vfs/`.
 - Phase 0 verified on hardware: boots, triggers `RG_PANIC("GBA: not yet implemented")`, recovers cleanly.
+- Phase 1 verified on hardware: ROM loads from `/sd/roms/GBA/`, gpsp runs the interpreter at ~45 FPS (BUSY:100%, CPU-bound). PPA SRM scales 240×160 → 720×480 letterboxed (top offset 120 px on the 720×720 display). Full-frame rate target is 59.73 Hz; current ~45 FPS reflects interpreter-only emulation without dynarec — to be addressed in Phase 5 (performance profiling).
 
 ## Key Files
 

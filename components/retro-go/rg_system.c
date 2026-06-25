@@ -919,7 +919,10 @@ void rg_system_switch_app(const char *partition, const char *name, const char *a
     if (update_boot_config(partition, name, args, flags))
         rg_system_restart();
 
-    RG_PANIC("Failed to switch app!");
+    // Partition not found (e.g. standalone dev binary without full OTA table).
+    // Log and restart in place rather than panicking into an unrecoverable loop.
+    RG_LOGW("Partition '%s' not found; restarting in place", partition ?: "?");
+    rg_system_restart();
 }
 
 bool rg_system_have_app(const char *app)

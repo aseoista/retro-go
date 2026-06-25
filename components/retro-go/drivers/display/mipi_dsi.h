@@ -397,8 +397,6 @@ static void lcd_submit_surface(const rg_surface_t *surface)
     }
 
     // ── PPA SRM: scale + RGB565 → BGR888 ──────────────────────────────────
-    // rgb_swap = true: PPA native output is [R,G,B]; swap gives [B,G,R] = BGR888
-    // which is what the ST7703 display expects (confirmed in Phase 4).
     ppa_srm_oper_config_t srm = {
         .in = {
             .buffer         = src_buf,

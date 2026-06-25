@@ -19,6 +19,11 @@
 
 #include "common.h"
 #include "streams/file_stream.h"
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#else
+#define EXT_RAM_BSS_ATTR
+#endif
 
 /* Sound */
 #define gbc_sound_tone_control_low(channel, regn)                             \
@@ -340,10 +345,10 @@ const u32 def_seq_cycles[16][2] =
 };
 
 
-u8 bios_rom[1024 * 16];
+EXT_RAM_BSS_ATTR u8 bios_rom[1024 * 16];
 
 // Up to 128kb, store SRAM, flash ROM, or EEPROM here.
-u8 gamepak_backup[1024 * 128];
+EXT_RAM_BSS_ATTR u8 gamepak_backup[1024 * 128];
 
 u32 dma_bus_val;
 dma_transfer_type dma[4];
