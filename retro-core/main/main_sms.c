@@ -280,5 +280,16 @@ void sms_main(void)
         {
             skipFrames--;
         }
+
+#ifdef RG_TARGET_SMARTBOX86
+        // On smartbox86 the ES8311 I2S driver's large DMA buffer does not provide
+        // frame-pacing backpressure via blocking writes. Pace explicitly here.
+        // Other retro-go targets rely on the IDF4 i2s driver blocking on a full buffer.
+        {
+            int64_t elapsed = rg_system_timer() - startTime;
+            if (elapsed < app->frameTime)
+                rg_usleep(app->frameTime - elapsed);
+        }
+#endif
     }
 }

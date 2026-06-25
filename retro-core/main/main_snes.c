@@ -397,14 +397,20 @@ void snes_main(void)
 
     rg_system_set_tick_rate(Memory.ROMFramesPerSecond);
     int samplesPerFrame = AUDIO_SAMPLE_RATE / Memory.ROMFramesPerSecond;
+#ifndef RG_TARGET_SMARTBOX86
     app->frameskip = 3;
+#else // RG_TARGET_SMARTBOX86
+    app->frameskip = 0;
+#endif // RG_TARGET_SMARTBOX86
 
     bool menuCancelled = false;
     bool menuPressed = false;
     int skipFrames = 0;
 
+#ifdef RG_SNES_PROFILING
     static int64_t prof_acc_emu, prof_acc_mix, prof_acc_audio, prof_acc_sleep, prof_acc_loop;
     static int64_t prof_ticks;
+#endif
 
     while (1)
     {
@@ -439,7 +445,9 @@ void snes_main(void)
         GFX.Screen = currentUpdate->data;
 
         S9xMainLoop();
+#ifdef RG_SNES_PROFILING
         int64_t tB = rg_system_timer();
+#endif
 
         if (drawFrame)
         {
@@ -457,42 +465,37 @@ void snes_main(void)
 
         rg_system_tick(tC - tA);
 
+#ifdef RG_SNES_PROFILING
+        int64_t tD = rg_system_timer();
+#endif
+
     #ifndef USE_BLARGG_APU
         if (apu_enabled)
             rg_audio_submit(audioBuffer, samplesPerFrame);
     #endif
-        int64_t tD = rg_system_timer();
 
-        // Cap at 100% speed: sleep any remaining frame time
-        // {
-        //     int64_t elapsed = tD - tA;
-        //     if (elapsed < app->frameTime)
-        //        rg_usleep(app->frameTime - elapsed);
-        // }
+#ifdef RG_SNES_PROFILING
         int64_t tE = rg_system_timer();
 
         prof_acc_emu   += tB - tA;
         prof_acc_mix   += tC - tB;
-        prof_acc_audio += tD - tC;
-        prof_acc_sleep += tE - tD;
+        prof_acc_audio += tE - tD;
         prof_acc_loop  += tE - tA;
 
-        //if (++prof_ticks >= app->tickRate)
-        //{
-        //    RG_LOGI("PROF emu=%d mix=%d audio=%d sleep=%d loop=%d us/tick\n",
-        //        (int)(prof_acc_emu   / prof_ticks),
-        //        (int)(prof_acc_mix   / prof_ticks),
-        //        (int)(prof_acc_audio / prof_ticks),
-        //        (int)(prof_acc_sleep / prof_ticks),
-        //        (int)(prof_acc_loop  / prof_ticks));
-        //    prof_acc_emu = prof_acc_mix = prof_acc_audio = prof_acc_sleep = prof_acc_loop = prof_ticks = 0;
-        //}
-
-        int64_t startTime = tA; // kept for skip-frame elapsed check below
+        if (++prof_ticks >= app->tickRate)
+        {
+            RG_LOGI("PROF emu=%d mix=%d audio=%d loop=%d us/tick\n",
+                (int)(prof_acc_emu   / prof_ticks),
+                (int)(prof_acc_mix   / prof_ticks),
+                (int)(prof_acc_audio / prof_ticks),
+                (int)(prof_acc_loop  / prof_ticks));
+            prof_acc_emu = prof_acc_mix = prof_acc_audio = prof_acc_sleep = prof_acc_loop = prof_ticks = 0;
+        }
+#endif
 
         if (skipFrames == 0)
         {
-            int elapsed = (int)(tE - startTime);
+            int elapsed = (int)(rg_system_timer() - tA);
             if (app->frameskip > 0)
                 skipFrames = app->frameskip;
             else if (elapsed > app->frameTime + 1500) // Allow some jitter
