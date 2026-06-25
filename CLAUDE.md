@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Retro-Go is a multi-app ESP32 firmware for handheld gaming devices. It bundles a launcher plus 5 emulators (NES, GB/GBC, PC Engine, SMS, SNES, Lynx, Game & Watch via `retro-core`; Sega Genesis via `gwenesis`; DOOM via `prboom-go`; MSX via `fmsx`) into a single firmware image using the ESP32 OTA partition mechanism for app switching.
+Retro-Go is a multi-app ESP32 firmware for handheld gaming devices. It bundles a launcher plus several emulators (NES, GB/GBC, PC Engine, SMS, SNES, Lynx, Game & Watch via `retro-core`; Sega Genesis via `gwenesis`; DOOM via `prboom-go`; MSX via `fmsx`; GBA via `gbsp`) into a single firmware image using the ESP32 OTA partition mechanism for app switching.
 
 ## Prerequisites
 
@@ -106,7 +106,7 @@ See `PORTING.md` for the full checklist.
 
 Active porting effort on branch `esp32p4smartbox86`. Target hardware: Waveshare ESP32-P4-WIFI6-Touch-LCD-4B (EP44B). Full plan in `esp32p4_smartbox86_porting.md`.
 
-### Status (as of 2026-06-21)
+### Status (as of 2026-06-25)
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -187,6 +187,54 @@ Virtual combo: START+SELECT → MENU (two-finger touch or physical button combo)
   - GT911 touch: RST=GPIO23, INT=NC (not connected); I2C addr 0x5D
 - Touch overlay (Phase 6): `RG_GAMEPAD_TOUCH_MAP` divides the 720×720 display into 14 hit zones (L/R shoulders, D-pad, face buttons X/Y/A/B, navigation row SELECT/MENU/OPTION/START). GT911 init is in `drivers/input/gt911.h`; polling added to `rg_input.c` via `#ifdef RG_GAMEPAD_TOUCH_MAP`.
 
+## GBA Emulator (`gbsp`) — ESP32-P4 only
+
+GBA emulation via the **libretro/gpsp** core (interpreter-only, no dynarec). Targets `smartbox86` only. Full porting plan in `GBA_porting.md`.
+
+### Status (as of 2026-06-25)
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | Scaffold — gpsp vendored, compiles, boots to RG_PANIC | Done |
+| 1 | ROM load + first frame | Pending |
+| 2 | Input | Pending |
+| 3 | Audio | Pending |
+| 4 | Save system (state + battery) | Pending |
+| 5 | Performance profiling | Pending |
+| 6 | Polish + launcher integration | Pending |
+
+### Directory layout
+
+```
+gbsp/
+├── CMakeLists.txt              # project(gbsp); COMPONENTS = "main retro-go gpsp"
+├── main/
+│   ├── CMakeLists.txt
+│   └── main_gba.c              # retro-go ↔ libretro glue (stub for now)
+└── components/
+    └── gpsp/
+        ├── CMakeLists.txt      # interpreter-only sources, HAVE_DYNAREC=0
+        ├── <gpsp sources>      # vendored from libretro/gpsp @ master
+        └── bios/
+            ├── gba_bios_normatt.h   # Normatt open-source BIOS as uint8_t[]
+            └── gba_bios_normatt.c   # definition of open_gba_bios_rom[]
+```
+
+### Build and flash for smartbox86
+
+```bash
+./rg_tool.py --target=smartbox86 build-img gbsp
+cd gbsp/build
+esptool.py -p /dev/ttyACM0 -b 460800 --chip esp32p4 write_flash @flash_args
+```
+
+### Key implementation notes
+
+- `bios_data.S` (`.incbin`) replaced by `bios/gba_bios_normatt.c` — a C array providing the `open_gba_bios_rom[]` symbol that `libretro.c` already expects.
+- `main.c` (gpsp SDL frontend) and `cpu_threaded.c` (dynarec) are excluded from the build.
+- `libretro-common` subset vendored alongside gpsp: `compat/`, `encodings/`, `file/`, `streams/`, `string/`, `time/`, `vfs/`.
+- Phase 0 verified on hardware: boots, triggers `RG_PANIC("GBA: not yet implemented")`, recovers cleanly.
+
 ## Key Files
 
 | File | Purpose |
@@ -204,6 +252,10 @@ Virtual combo: START+SELECT → MENU (two-finger touch or physical button combo)
 | `components/retro-go/drivers/audio/es8311.c` | Phase 5: ES8311 codec driver — IDF 5.x i2s_std + rg_i2c register writes |
 | `components/retro-go/drivers/input/gt911.h` | Phase 6: GT911 touch driver — raw I2C polling, no BSP dependency |
 | `components/esp_lcd_st7703/` | Local copy of Waveshare ST7703 panel driver (no BSP/LVGL dependency) |
+| `gbsp/main/main_gba.c` | GBA emulator entry point (retro-go ↔ libretro glue) |
+| `gbsp/components/gpsp/` | Vendored libretro/gpsp interpreter sources |
+| `gbsp/components/gpsp/bios/` | Normatt open-source GBA BIOS as compiled-in C array |
+| `GBA_porting.md` | Full phase-by-phase GBA porting plan |
 
 ## Theme & Localization
 
