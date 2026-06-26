@@ -12,6 +12,7 @@
 static rg_app_t *app;
 static rg_surface_t *screen;
 static uint32_t current_joystick;
+static bool skip_video_frame = false;
 
 /* ---- libretro log callback ---- */
 
@@ -82,7 +83,7 @@ static bool env_cb(unsigned cmd, void *data)
 
 static void video_refresh_cb(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-    if (!data || !screen)
+    if (!data || !screen || skip_video_frame)
         return;
     /* pitch is in bytes; for GBA pitch == width * 2 == 480 */
     memcpy(screen->data, data, height * pitch);
@@ -264,6 +265,7 @@ void app_main(void)
 
     bool menu_pressed = false;
     bool menu_cancelled = false;
+    int skipFrames = 0;
 
     while (1) {
         uint32_t joystick = rg_input_read_gamepad();
@@ -282,7 +284,29 @@ void app_main(void)
         menu_cancelled |= menu_pressed && (joystick & ~RG_KEY_MENU);
 
         int64_t frame_start = rg_system_timer();
+        skip_video_frame = (skipFrames > 0);
+
         retro_run();
+
         rg_system_tick(rg_system_timer() - frame_start);
+
+        if (skipFrames == 0) {
+            int elapsed = rg_system_timer() - frame_start;
+            if (app->frameskip > 0)
+                skipFrames = app->frameskip;
+            else if (elapsed > app->frameTime + 1500)
+                skipFrames = 1;
+        } else if (skipFrames > 0) {
+            skipFrames--;
+        }
+
+#ifdef RG_TARGET_SMARTBOX86
+        /* ES8311 DMA buffer doesn't provide frame-pacing backpressure; pace explicitly. */
+        {
+            int64_t elapsed = rg_system_timer() - frame_start;
+            if (elapsed < app->frameTime)
+                rg_usleep(app->frameTime - elapsed);
+        }
+#endif
     }
 }
