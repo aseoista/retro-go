@@ -586,6 +586,8 @@ static const u8 gba_header_logo[156] = {
     pc_region = new_pc_region;                                                \
     pc_address_block = memory_map_read[new_pc_region];                        \
     touch_gamepak_page(pc_region);                                            \
+    pc_seq_cycles = ws_cyc_seq[(pc_region >> 9) & 0xF][1];                   \
+    pc_seq_cycles_thumb = ws_cyc_seq[(pc_region >> 9) & 0xF][0];             \
                                                                               \
     if(!pc_address_block)                                                     \
       pc_address_block = load_gamepak_page(pc_region & 0x3FF);                \
@@ -1471,16 +1473,21 @@ u32 reg[64];
 u32 spsr[6];
 u32 reg_mode[7][7];
 
-EXT_RAM_BSS_ATTR u8 *memory_map_read [8 * 1024];
+// memory_map_read: 32KB page table — hot on every instruction fetch; keep in DRAM
+u8 *memory_map_read [8 * 1024];
 u16 oam_ram[512];
 u16 palette_ram[512];
 u16 palette_ram_converted[512];
 EXT_RAM_BSS_ATTR u8 ewram[1024 * 256 * 2];
-EXT_RAM_BSS_ATTR u8 iwram[1024 * 32 * 2];
+// iwram: 64KB (active half = 32KB) — most frequently accessed GBA RAM; keep in DRAM
+u8 iwram[1024 * 32 * 2];
 EXT_RAM_BSS_ATTR u8 vram[1024 * 96];
 u16 io_registers[512];
 #endif
 
+#ifdef ESP_PLATFORM
+IRAM_ATTR
+#endif
 void execute_arm(u32 cycles)
 {
   u32 opcode;
@@ -1490,6 +1497,8 @@ void execute_arm(u32 cycles)
   u8 *pc_address_block = memory_map_read[pc_region];
   u32 new_pc_region;
   s32 cycles_remaining;
+  s32 pc_seq_cycles = ws_cyc_seq[(pc_region >> 9) & 0xF][1];
+  s32 pc_seq_cycles_thumb = ws_cyc_seq[(pc_region >> 9) & 0xF][0];
   u32 update_ret;
   cpu_alert_type cpu_alert;
 
@@ -1519,11 +1528,11 @@ void execute_arm(u32 cycles)
     {
 arm_loop:
 
-       collapse_flags();
-
+#ifndef GPSP_NO_CHEATS
        /* Process cheats if we are about to execute the cheat hook */
        if (reg[REG_PC] == cheat_master_hook)
           process_cheats();
+#endif
 
        /* Execute ARM instruction */
        using_instruction(arm);
@@ -3063,7 +3072,7 @@ arm_loop:
 skip_instruction:
 
        /* End of Execute ARM instruction */
-       cycles_remaining -= ws_cyc_seq[(reg[REG_PC] >> 24) & 0xF][1];
+       cycles_remaining -= pc_seq_cycles;
 
        if (reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0) cycles_remaining = 0;
 
@@ -3083,11 +3092,11 @@ skip_instruction:
     {
 thumb_loop:
 
-       collapse_flags();
-
+#ifndef GPSP_NO_CHEATS
        /* Process cheats if we are about to execute the cheat hook */
        if (reg[REG_PC] == cheat_master_hook)
           process_cheats();
+#endif
 
        /* Execute THUMB instruction */
 
@@ -3543,7 +3552,7 @@ thumb_loop:
        }
 
        /* End of Execute THUMB instruction */
-       cycles_remaining -= ws_cyc_seq[(reg[REG_PC] >> 24) & 0xF][0];
+       cycles_remaining -= pc_seq_cycles_thumb;
 
        if (reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0) cycles_remaining = 0;
 

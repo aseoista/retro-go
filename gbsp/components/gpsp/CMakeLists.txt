@@ -40,6 +40,7 @@ register_component()
 
 target_compile_definitions(${COMPONENT_TARGET} PRIVATE
     THREADED_RENDERER=0
+    GPSP_NO_CHEATS=1
 )
 
-rg_setup_compile_options(-Wno-unused-function -Wno-sign-compare -Wno-unused-variable -fno-exceptions)
+rg_setup_compile_options(-O3 -Wno-unused-function -Wno-sign-compare -Wno-unused-variable -fno-exceptions)

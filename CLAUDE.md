@@ -191,16 +191,16 @@ Virtual combo: START+SELECT → MENU (two-finger touch or physical button combo)
 
 GBA emulation via the **libretro/gpsp** core (interpreter-only, no dynarec). Targets `smartbox86` only. Full porting plan in `GBA_porting.md`.
 
-### Status (as of 2026-06-25)
+### Status (as of 2026-06-26)
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Scaffold — gpsp vendored, compiles, boots to RG_PANIC | Done |
-| 1 | ROM load + first frame | Done (running at ~45 FPS; not yet at 60 FPS target) |
+| 1 | ROM load + first frame | Done |
 | 2 | Input | Pending |
 | 3 | Audio | Pending |
 | 4 | Save system (state + battery) | Pending |
-| 5 | Performance profiling | Pending |
+| 5 | Performance profiling | Done (avg 51 FPS, 56–60 FPS typical, 46 FPS floor in heaviest scenes) |
 | 6 | Polish + launcher integration | Pending |
 
 ### Directory layout
@@ -234,7 +234,22 @@ esptool.py -p /dev/ttyACM0 -b 460800 --chip esp32p4 write_flash @flash_args
 - `main.c` (gpsp SDL frontend) and `cpu_threaded.c` (dynarec) are excluded from the build.
 - `libretro-common` subset vendored alongside gpsp: `compat/`, `encodings/`, `file/`, `streams/`, `string/`, `time/`, `vfs/`.
 - Phase 0 verified on hardware: boots, triggers `RG_PANIC("GBA: not yet implemented")`, recovers cleanly.
-- Phase 1 verified on hardware: ROM loads from `/sd/roms/GBA/`, gpsp runs the interpreter at ~45 FPS (BUSY:100%, CPU-bound). PPA SRM scales 240×160 → 720×480 letterboxed (top offset 120 px on the 720×720 display). Full-frame rate target is 59.73 Hz; current ~45 FPS reflects interpreter-only emulation without dynarec — to be addressed in Phase 5 (performance profiling).
+- Phase 1 verified on hardware: ROM loads from `/sd/roms/GBA/`, gpsp runs the interpreter. PPA SRM scales 240×160 → 720×480 letterboxed (top offset 120 px on the 720×720 display).
+- Phase 5 (performance profiling) done: hardware-measured avg 51 FPS, 56–60 FPS in typical gameplay, 46 FPS floor for heaviest scenes. See optimizations table below.
+
+### Phase 5 — interpreter optimizations applied (cpu.cc / CMakeLists.txt)
+
+| Optimization | Saving | Notes |
+|---|---|---|
+| `-O3` for gpsp component | +5 FPS | Was missing from `rg_setup_compile_options` call |
+| `iwram` (64 KB) → DRAM (no `EXT_RAM_BSS_ATTR`) | +3 FPS | Most-accessed GBA RAM; PSRAM D-cache pressure removed |
+| `memory_map_read` (32 KB) → DRAM | included above | Page table hot on every instruction fetch |
+| `execute_arm` → `IRAM_ATTR` | <1 FPS | Interpreter code fits in I-cache; marginal improvement |
+| Cache `pc_seq_cycles` — avoid `ws_cyc_seq[]` lookup per instruction | +3 FPS | Eliminates DRAM table lookup + shift at every `skip_instruction` |
+| `GPSP_NO_CHEATS=1` define — remove per-instruction cheat hook check | +2 FPS | `cheat_master_hook=0xffffffff` never matches; check was dead code |
+| Remove `collapse_flags()` from `arm_loop`/`thumb_loop` tops | +8 FPS | Was redundant: MRS uses `arm_psr_read` (explicit collapse), IRQ uses `alert:` handler (explicit collapse), MSR uses `extract_flags` after — no path reads CPSR flags without a prior explicit collapse/extract |
+
+**46 FPS floor** in heaviest scenes is the interpreter PSRAM D-cache limit: GBA ROM data reads from PSRAM go through a 32 KB D-cache; heavy-branching games evict cache lines and incur ~25-cycle penalties per miss. Without dynarec there is no practical way to eliminate this.
 
 ## Key Files
 
