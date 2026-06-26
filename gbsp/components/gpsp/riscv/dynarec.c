@@ -300,9 +300,25 @@ static void emit_cond_end(u8 **end_ptr, cond_patch_t cp) {
 
 /* ── Block prologue / epilogue ──────────────────────────────────────────── */
 
+/* Stack frame layout (sp-16 allocated in prologue):
+ *   sp+12 : caller's s0 (C outer loop uses s0 = &reg[0])
+ *   sp+8  : caller's s1 (C outer loop uses s1 = cycles_remaining)
+ * We must save/restore s0/s1 because the JIT uses them for its own
+ * convention (JIT_CYCLES=s0, JIT_REG_BASE=s1) and the RISC-V ABI
+ * requires callees to preserve callee-saved registers. */
+
 static void emit_block_prologue(u8 **ptr) {
+    emit32(ptr, rv_addi(RV_SP, RV_SP, -16));              /* allocate frame */
+    emit32(ptr, rv_sw(RV_S0, RV_SP, 12));                 /* save caller s0 */
+    emit32(ptr, rv_sw(RV_S1, RV_SP, 8));                  /* save caller s1 */
     emit_li32(ptr, JIT_REG_BASE, (u32)(uintptr_t)&reg[0]);
     emit32(ptr, rv_lw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
+}
+
+static void emit_restore_callee_regs(u8 **ptr) {
+    emit32(ptr, rv_lw(RV_S1, RV_SP, 8));                  /* restore caller s1 */
+    emit32(ptr, rv_lw(RV_S0, RV_SP, 12));                 /* restore caller s0 */
+    emit32(ptr, rv_addi(RV_SP, RV_SP, 16));               /* free frame */
 }
 
 /* Used for normal block end (next_pc = first uncompiled instruction). */
@@ -318,6 +334,7 @@ static void emit_block_epilogue(u8 **ptr, u32 next_pc, int block_cycles) {
     emit32(ptr, rv_sw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
     emit_li32(ptr, RV_T0, next_pc);
     emit32(ptr, rv_sw(RV_T0, JIT_REG_BASE, REG_PC * 4));
+    emit_restore_callee_regs(ptr);
     emit32(ptr, rv_ret());
 }
 
@@ -332,6 +349,7 @@ static void emit_block_epilogue_pc_written(u8 **ptr, int block_cycles) {
         }
     }
     emit32(ptr, rv_sw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
+    emit_restore_callee_regs(ptr);
     emit32(ptr, rv_ret());
 }
 
@@ -1002,7 +1020,7 @@ static bool translate_branch(u8 **ptr, u32 opcode, u32 pc, int block_cycles,
         }
         emit_li32(ptr, RV_T0, target);
         emit_store_reg(ptr, RV_T0, REG_PC);
-        /* Inline exit: deduct cycles accumulated so far, save, ret */
+        /* Inline exit: deduct cycles accumulated so far, save, restore, ret */
         if (block_cycles <= 2047)
             emit32(ptr, rv_addi(JIT_CYCLES, JIT_CYCLES, -block_cycles));
         else {
@@ -1010,6 +1028,7 @@ static bool translate_branch(u8 **ptr, u32 opcode, u32 pc, int block_cycles,
             emit32(ptr, rv_add(JIT_CYCLES, JIT_CYCLES, RV_T0));
         }
         emit32(ptr, rv_sw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
+        emit_restore_callee_regs(ptr);
         emit32(ptr, rv_ret());
         /* Patch the condition branch to land here (not-taken fallthrough) */
         emit_cond_end(ptr, cp);
@@ -1056,6 +1075,7 @@ static bool translate_branch(u8 **ptr, u32 opcode, u32 pc, int block_cycles,
         emit32(ptr, rv_add(JIT_CYCLES, JIT_CYCLES, RV_T0));
     }
     emit32(ptr, rv_sw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
+    emit_restore_callee_regs(ptr);
     emit32(ptr, rv_ret());
     emit_cond_end(ptr, cp);
     *pc_written_out = false;
@@ -1159,8 +1179,18 @@ bool translate_block_arm(u32 pc, bool ram_region) {
         emit_block_epilogue(cache, cur_pc, block_cycles);
 
 #ifdef ESP_PLATFORM
-    esp_cache_msync(block_start, (size_t)(*cache - block_start),
-                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
+    {
+        size_t block_sz = (size_t)(*cache - block_start);
+        /* Flush D-cache dirty lines to PSRAM (UNALIGNED accepted for C2M). */
+        esp_cache_msync(block_start, block_sz,
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        /* Invalidate I-cache for this range.  M2C|INST requires cache-line alignment. */
+        uint8_t *ia = (uint8_t *)((uintptr_t)block_start & ~63u);
+        uint8_t *ie = (uint8_t *)(((uintptr_t)block_start + block_sz + 63u) & ~63u);
+        esp_cache_msync(ia, (size_t)(ie - ia),
+                        ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
+    }
 #endif
 
     rom_branch_hash[HASH_IDX(start_pc)] = (u32)(uintptr_t)block_start;
