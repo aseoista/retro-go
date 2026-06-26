@@ -492,7 +492,7 @@ void snes_main(void)
             prof_acc_emu = prof_acc_mix = prof_acc_audio = prof_acc_sleep = prof_acc_loop = prof_ticks = 0;
         }
 #endif
-
+#if 0
         if (skipFrames == 0)
         {
             int elapsed = (int)(rg_system_timer() - tA);
@@ -507,5 +507,6 @@ void snes_main(void)
         {
             skipFrames--;
         }
+#endif
     }
 }

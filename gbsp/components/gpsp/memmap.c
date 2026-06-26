@@ -24,6 +24,25 @@
 
 #ifdef MMAP_JIT_CACHE
 
+// ESP32-P4 (RISC-V): allocate the JIT cache directly from PSRAM.
+// With CONFIG_SPIRAM_XIP_FROM_PSRAM=y the PSRAM window is executable via the
+// I-cache, so no special RWX mapping is needed.  All cross-region calls from
+// JIT code use JALR (indirect), so there is no proximity constraint.
+#if defined(ESP_PLATFORM)
+
+#include "esp_heap_caps.h"
+
+void *map_jit_block(unsigned size) {
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+}
+
+void unmap_jit_block(void *bufptr, unsigned size) {
+    (void)size;
+    heap_caps_free(bufptr);
+}
+
+#else /* !ESP_PLATFORM — original mmap/VirtualAlloc path */
+
 // JIT block requirements translated to allocation code.
 #if defined(MIPS_ARCH)
   #define _MAP_ITERATIONS           1024   // Test -/+2GB in 4MB steps
@@ -127,6 +146,8 @@ bool validate_addr_section_mips(void *ptr, unsigned size, unsigned max_offset_mb
 	}
 
 #endif /* WIN32 */
+
+#endif /* !ESP_PLATFORM */
 
 #endif /* MMAP_JIT_CACHE */
 

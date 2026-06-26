@@ -374,7 +374,7 @@ void gbc_main(void)
 
         // Tick before submitting audio/syncing
         rg_system_tick(rg_system_timer() - startTime - audio_time);
-
+# if 0
         if (skipFrames == 0)
         {
             int elapsed = rg_system_timer() - startTime;
@@ -389,7 +389,7 @@ void gbc_main(void)
         {
             skipFrames--;
         }
-
+#endif
 #ifdef RG_TARGET_SMARTBOX86
         // On smartbox86 the ES8311 I2S driver's large DMA buffer does not provide
         // frame-pacing backpressure via blocking writes. Pace explicitly here.

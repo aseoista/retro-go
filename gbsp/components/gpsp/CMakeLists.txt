@@ -25,6 +25,7 @@ set(COMPONENT_SRCS
     libretro/libretro-common/time/rtime.c
     libretro/libretro-common/vfs/vfs_implementation.c
     bios/gba_bios_normatt.c
+    riscv/dynarec.c
 )
 
 set(COMPONENT_ADD_INCLUDEDIRS
@@ -34,13 +35,16 @@ set(COMPONENT_ADD_INCLUDEDIRS
     "bios"
 )
 
-set(COMPONENT_REQUIRES "retro-go")
+set(COMPONENT_REQUIRES "retro-go" "esp_mm")
 
 register_component()
 
 target_compile_definitions(${COMPONENT_TARGET} PRIVATE
     THREADED_RENDERER=0
     GPSP_NO_CHEATS=1
+    HAVE_DYNAREC=1
+    MMAP_JIT_CACHE=1
+    SMALL_TRANSLATION_CACHE=1
 )
 
 rg_setup_compile_options(-O3 -Wno-unused-function -Wno-sign-compare -Wno-unused-variable -fno-exceptions)

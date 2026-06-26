@@ -289,7 +289,7 @@ void app_main(void)
         retro_run();
 
         rg_system_tick(rg_system_timer() - frame_start);
-
+#if 0
         if (skipFrames == 0) {
             int elapsed = rg_system_timer() - frame_start;
             if (app->frameskip > 0)
@@ -299,7 +299,7 @@ void app_main(void)
         } else if (skipFrames > 0) {
             skipFrames--;
         }
-
+#endif
 #ifdef RG_TARGET_SMARTBOX86
         /* ES8311 DMA buffer doesn't provide frame-pacing backpressure; pace explicitly. */
         {
