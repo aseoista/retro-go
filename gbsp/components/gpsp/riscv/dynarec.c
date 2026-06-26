@@ -1,10 +1,17 @@
 /* RISC-V JIT backend for gpsp on ESP32-P4.
  *
- * Phase B: ARM data-processing instruction translation.
- *   Translates ARM data-proc blocks into RISC-V machine code in PSRAM.
- *   Immediate and register-with-immediate-shift operand forms translated
- *   inline; register-register-shift terminates the block (interpreter).
- *   ADC/SBC/RSC deferred to Phase B.2 — block terminates on those.
+ * Phase D: ARM branch instruction translation.
+ *   B / BL (bits 27:25 = 101): signed 24-bit offset, optional LR save.
+ *   BX Rm (bits 27:4 = 0x12FFF1): branch + optional Thumb switch.
+ *   Unconditional branches terminate the block; conditional branches emit
+ *   an inline taken-path (early exit with ret) and fall through for not-taken,
+ *   allowing the block to continue translating subsequent instructions.
+ *
+ *   Phases A–C:
+ *   Data-processing (MOV/ADD/SUB/CMP/AND/…) and load/store (LDR/STR/LDM/STM).
+ *   Immediate and register-with-immediate-shift operand forms translated inline;
+ *   register-register-shift terminates the block (interpreter).
+ *   ADC/SBC/RSC deferred to a later phase.
  *
  *   Calling convention with compiled blocks:
  *     Blocks are void(*)(void).  Prologue: s1 = &reg[0] (absolute),
@@ -927,9 +934,11 @@ static bool translate_ldm_stm(u8 **ptr, u32 opcode, u32 cur_pc,
 /* ── Data-processing classifier ─────────────────────────────────────────── */
 
 /* True iff opcode is a data-processing instruction we can attempt to translate.
- * Bits 27:26 = 00, not multiply/halfword, not MRS/MSR. */
+ * Bits 27:26 = 00, not multiply/halfword, not MRS/MSR, not BX. */
 static bool is_data_proc(u32 opcode) {
     if ((opcode >> 26) & 3) return false;
+    /* BX shares bits 27:26 = 00 with data-proc; exclude it explicitly. */
+    if ((opcode & 0x0FFFFFF0) == 0x012FFF10) return false;
     bool I = (opcode >> 25) & 1;
     if (!I && (opcode & 0x90) == 0x90) return false;  /* multiply / halfword */
     /* MRS/MSR: op[24:21] in {8..11} with S=0 */
@@ -938,6 +947,119 @@ static bool is_data_proc(u32 opcode) {
     /* PSR transfer with immediate also covers some MSR encodings */
     if (I && !((opcode >> 20) & 1) && op >= 8 && op <= 11) return false;
     return true;
+}
+
+/* ── Branch classifier ───────────────────────────────────────────────────── */
+
+/* B/BL: bits 27:25 = 101.  BX: (opcode & 0x0FFFFFF0) == 0x012FFF10. */
+static bool is_branch(u32 opcode) {
+    if (((opcode >> 25) & 7) == 5) return true;            /* B / BL */
+    if ((opcode & 0x0FFFFFF0) == 0x012FFF10) return true;  /* BX     */
+    return false;
+}
+
+/* ── Branch instruction translator ─────────────────────────────────────────
+ *
+ * block_cycles must already include this instruction's cycle cost (incremented
+ * by the caller before the call).
+ *
+ * For unconditional branches: stores target/Rm to reg[REG_PC], sets
+ * *pc_written_out = true, returns true (block terminates).
+ *
+ * For conditional branches: emits an inline taken-path (reg[REG_PC] update +
+ * cycle deduct + ret) guarded by the ARM condition; the not-taken path falls
+ * through.  Returns false (block continues).
+ * -------------------------------------------------------------------------- */
+
+static bool translate_branch(u8 **ptr, u32 opcode, u32 pc, int block_cycles,
+                              bool *pc_written_out) {
+    u32 cond = opcode >> 28;
+
+    /* ── B / BL ── */
+    if (((opcode >> 25) & 7) == 5) {
+        bool link   = (opcode >> 24) & 1;
+        /* Sign-extend 24-bit offset, multiply by 4 */
+        int32_t off = (int32_t)((opcode & 0x00FFFFFFu) << 8) >> 6;
+        u32 target  = pc + 8 + (u32)off;
+
+        if (cond == 0xE) {
+            /* Unconditional B/BL — terminates block */
+            if (link) {
+                emit_li32(ptr, RV_T0, pc + 4);
+                emit_store_reg(ptr, RV_T0, REG_LR);
+            }
+            emit_li32(ptr, RV_T0, target);
+            emit_store_reg(ptr, RV_T0, REG_PC);
+            *pc_written_out = true;
+            return true;
+        }
+
+        /* Conditional: taken-path exits inline, not-taken falls through */
+        cond_patch_t cp = emit_cond_begin(ptr, cond);
+        if (link) {
+            emit_li32(ptr, RV_T0, pc + 4);
+            emit_store_reg(ptr, RV_T0, REG_LR);
+        }
+        emit_li32(ptr, RV_T0, target);
+        emit_store_reg(ptr, RV_T0, REG_PC);
+        /* Inline exit: deduct cycles accumulated so far, save, ret */
+        if (block_cycles <= 2047)
+            emit32(ptr, rv_addi(JIT_CYCLES, JIT_CYCLES, -block_cycles));
+        else {
+            emit_li32(ptr, RV_T0, (u32)(unsigned)(-block_cycles));
+            emit32(ptr, rv_add(JIT_CYCLES, JIT_CYCLES, RV_T0));
+        }
+        emit32(ptr, rv_sw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
+        emit32(ptr, rv_ret());
+        /* Patch the condition branch to land here (not-taken fallthrough) */
+        emit_cond_end(ptr, cp);
+        *pc_written_out = false;
+        return false;  /* block continues */
+    }
+
+    /* ── BX Rm ──
+     * PC = Rm & ~1.  CPSR T-bit = Rm[0] (bit 5 of CPSR).
+     * Clears bit 5: andi t2, t2, -33  (imm = 0xFDF as 12-bit signed = -33,
+     * sign-extends to 0xFFFFFFDF which zeroes bit 5). */
+    u32 rm = opcode & 0xF;
+
+    if (cond == 0xE) {
+        /* Unconditional BX — terminates block */
+        emit_load_reg(ptr, RV_T0, rm);
+        emit32(ptr, rv_andi(RV_T1, RV_T0, 1));              /* t1 = Rm[0] = new T */
+        emit32(ptr, rv_andi(RV_T0, RV_T0, -2));             /* t0 = Rm & ~1 = new PC */
+        emit_store_reg(ptr, RV_T0, REG_PC);
+        emit_load_reg(ptr, RV_T2, REG_CPSR);
+        emit32(ptr, rv_andi(RV_T2, RV_T2, (int)(~0x20u)));  /* clear T bit */
+        emit32(ptr, rv_slli(RV_T1, RV_T1, 5));              /* T << 5 */
+        emit32(ptr, rv_or(RV_T2, RV_T2, RV_T1));
+        emit_store_reg(ptr, RV_T2, REG_CPSR);
+        *pc_written_out = true;
+        return true;
+    }
+
+    /* Conditional BX */
+    cond_patch_t cp = emit_cond_begin(ptr, cond);
+    emit_load_reg(ptr, RV_T0, rm);
+    emit32(ptr, rv_andi(RV_T1, RV_T0, 1));
+    emit32(ptr, rv_andi(RV_T0, RV_T0, -2));
+    emit_store_reg(ptr, RV_T0, REG_PC);
+    emit_load_reg(ptr, RV_T2, REG_CPSR);
+    emit32(ptr, rv_andi(RV_T2, RV_T2, (int)(~0x20u)));
+    emit32(ptr, rv_slli(RV_T1, RV_T1, 5));
+    emit32(ptr, rv_or(RV_T2, RV_T2, RV_T1));
+    emit_store_reg(ptr, RV_T2, REG_CPSR);
+    if (block_cycles <= 2047)
+        emit32(ptr, rv_addi(JIT_CYCLES, JIT_CYCLES, -block_cycles));
+    else {
+        emit_li32(ptr, RV_T0, (u32)(unsigned)(-block_cycles));
+        emit32(ptr, rv_add(JIT_CYCLES, JIT_CYCLES, RV_T0));
+    }
+    emit32(ptr, rv_sw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
+    emit32(ptr, rv_ret());
+    emit_cond_end(ptr, cp);
+    *pc_written_out = false;
+    return false;  /* block continues */
 }
 
 /* ── Block translation ──────────────────────────────────────────────────── */
@@ -977,7 +1099,17 @@ bool translate_block_arm(u32 pc, bool ram_region) {
         u32 opcode = jit_read_arm_opcode(cur_pc);
         u8 *before = *cache;
 
-        if (is_data_proc(opcode)) {
+        if (is_branch(opcode)) {
+            /* Branches always account for their own cycle; translate_branch
+             * receives the already-incremented count for inline-exit costing. */
+            block_cycles += per_cycle;
+            bool terminates = translate_branch(cache, opcode, cur_pc,
+                                               block_cycles, &pc_written);
+            cur_pc += 4;
+            if (terminates) break;
+            /* Conditional branch: not-taken path falls through; keep translating. */
+
+        } else if (is_data_proc(opcode)) {
             u32 rd = (opcode >> 12) & 0xF;
             if (!translate_data_proc(cache, opcode, cur_pc)) {
                 *cache = before;
