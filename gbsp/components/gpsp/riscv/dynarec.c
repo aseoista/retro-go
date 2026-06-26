@@ -88,6 +88,75 @@ static void jit_extract_flags(void) {
     reg[REG_V_FLAG] = (reg[REG_CPSR] >> 28) & 1;
 }
 
+/* ── Memory access wrappers (called from JIT blocks via emit_call32) ────────
+ * Standard RISC-V ABI: first arg in a0, second in a1, return in a0.
+ * function_cc is empty on RISC-V, so standard ABI applies.
+ * -------------------------------------------------------------------------- */
+
+u32 function_cc execute_load_u8(u32 address)   { return read_memory8(address); }
+u32 function_cc execute_load_u16(u32 address)  { return read_memory16(address); }
+u32 function_cc execute_load_u32(u32 address)  { return read_memory32(address); }
+u32 function_cc execute_load_s8(u32 address)   { return read_memory8s(address); }
+u32 function_cc execute_load_s16(u32 address)  { return read_memory16s(address); }
+
+void function_cc execute_store_u8(u32 address, u32 source)   { write_memory8(address, (u8)source); }
+void function_cc execute_store_u16(u32 address, u32 source)  { write_memory16(address, (u16)source); }
+void function_cc execute_store_u32(u32 address, u32 source)  { write_memory32(address, source); }
+void function_cc execute_store_aligned_u32(u32 address, u32 source) {
+    write_memory32(address & ~3u, source);
+}
+
+/* ── LDM/STM C helper ───────────────────────────────────────────────────────
+ * Called from JIT blocks.  Before calling, emit code to set reg[REG_PC] to
+ * instruction_pc + 4 so STM with PC stores the correct value (instruction+8).
+ * S-bit instructions must NOT be routed here; caller must verify S=0.
+ * -------------------------------------------------------------------------- */
+
+void execute_ldm_stm(u32 opcode) {
+    bool P      = (opcode >> 24) & 1;
+    bool U      = (opcode >> 23) & 1;
+    bool W      = (opcode >> 21) & 1;
+    bool L      = (opcode >> 20) & 1;
+    u32  rn     = (opcode >> 16) & 0xF;
+    u32  reglist = opcode & 0xFFFF;
+
+    if (!reglist) return;
+
+    u32 base    = reg[rn];
+    int numops  = __builtin_popcount(reglist);
+    int step    = U ? 4 : -4;
+    u32 endaddr = base + (u32)(step * numops);
+
+    u32 address;
+    if      (P && U)   address = base + 4;
+    else if (!P && U)  address = base;
+    else if (P && !U)  address = endaddr;
+    else               address = endaddr + 4;
+    address &= ~3u;
+
+    /* Writeback order per ARM ARM §4.11.6 */
+    bool wrbck_base      = (reglist >> rn) & 1;
+    bool base_first      = (((1u << rn) - 1u) & reglist) == 0;
+    bool writeback_first = L || !(wrbck_base && base_first);
+
+    if (W && writeback_first) reg[rn] = endaddr;
+
+    for (u32 i = 0; i < 16; i++) {
+        if ((reglist >> i) & 1) {
+            if (L) {
+                reg[i] = read_memory32(address);
+            } else {
+                /* PC stores instruction+8. reg[REG_PC] was pre-set to
+                 * instruction_pc+4 by the JIT before the call, so +4 gives +8. */
+                write_memory32(address, (i == REG_PC) ? reg[REG_PC] + 4 : reg[i]);
+            }
+            address += 4;
+        }
+    }
+
+    if (W && !writeback_first) reg[rn] = endaddr;
+}
+
 /* ── GBA memory read at translation time ────────────────────────────────── */
 
 static u32 jit_read_arm_opcode(u32 pc) {
@@ -361,6 +430,48 @@ static bool emit_op2(u8 **ptr, u32 opcode, u32 pc, bool set_c) {
     return true;
 }
 
+/* ── Shift without carry-flag update ────────────────────────────────────────
+ * Applies shift (types 0-3, imm5) to src, writes result to dst.
+ * dst may equal src. Temporaries used: t3, t4 (only for ROR/RRX cases).
+ * -------------------------------------------------------------------------- */
+
+static void emit_shift_noc(u8 **ptr, int dst, int src, u32 shift_typ, u32 imm5) {
+    switch (shift_typ) {
+    case 0:  /* LSL #imm5 */
+        if (imm5 == 0) {
+            if (dst != src) emit32(ptr, rv_addi(dst, src, 0));
+        } else {
+            emit32(ptr, rv_slli(dst, src, imm5));
+        }
+        break;
+    case 1:  /* LSR #imm5 (0 = LSR #32 = 0) */
+        if (imm5 == 0)
+            emit32(ptr, rv_addi(dst, RV_ZERO, 0));
+        else
+            emit32(ptr, rv_srli(dst, src, imm5));
+        break;
+    case 2:  /* ASR #imm5 (0 = ASR #32) */
+        emit32(ptr, rv_srai(dst, src, imm5 == 0 ? 31 : imm5));
+        break;
+    case 3:  /* ROR #imm5 (0 = RRX) */
+    {
+        int tmp = (dst == RV_T3) ? RV_T4 : RV_T3;
+        if (imm5 == 0) {
+            /* RRX: result = (src >> 1) | (C << 31) */
+            emit_load_reg(ptr, tmp, REG_C_FLAG);
+            emit32(ptr, rv_srli(dst, src, 1));
+            emit32(ptr, rv_slli(tmp, tmp, 31));
+            emit32(ptr, rv_or(dst, dst, tmp));
+        } else {
+            emit32(ptr, rv_srli(tmp, src, imm5));
+            emit32(ptr, rv_slli(dst, src, 32 - imm5));
+            emit32(ptr, rv_or(dst, dst, tmp));
+        }
+        break;
+    }
+    }
+}
+
 /* ── Flag emitters ──────────────────────────────────────────────────────────
  * After the result is in RV_T2, operands Rn in RV_T0, op2 in RV_T1.
  * Temporaries: t3, t4.
@@ -537,7 +648,283 @@ static bool translate_data_proc(u8 **ptr, u32 opcode, u32 pc) {
     return true;
 }
 
-/* ── Instruction classification ─────────────────────────────────────────── */
+/* ── Instruction classifiers ────────────────────────────────────────────── */
+
+/* Single-register LDR/STR: bits 27:26 = 01 */
+static bool is_single_ldrstr(u32 opcode) {
+    return ((opcode >> 26) & 3) == 1;
+}
+
+/* Halfword/signed-byte: bits 27:25 = 000, bit 7 = 1, bit 4 = 1,
+ * bits 6:5 != 00 (else it's a multiply). */
+static bool is_halfword_ldrstr(u32 opcode) {
+    if ((opcode >> 25) & 7) return false;
+    if ((opcode & 0x90) != 0x90) return false;
+    return (opcode & 0x60) != 0;
+}
+
+/* LDM/STM: bits 27:25 = 100 */
+static bool is_ldm_stm(u32 opcode) {
+    return ((opcode >> 25) & 7) == 4;
+}
+
+/* ── Single-register load/store translator ───────────────────────────────── *
+ * Translates LDR/STR/LDRB/STRB (bits 27:26 = 01).
+ *
+ * Register allocation:
+ *   a0 = address (built in-place; also return value for loads)
+ *   a1 = store source
+ *   t0 = post-indexed writeback value (saved to reg[] before call)
+ *   t2 = shifted register offset
+ *   t3/t4 = shift temporaries
+ *
+ * Writeback is written to reg[Rn] BEFORE the memory helper call, matching the
+ * interpreter's ARM7 pipeline behaviour.
+ * -------------------------------------------------------------------------- */
+
+static bool translate_single_ldrstr(u8 **ptr, u32 opcode, u32 pc,
+                                     bool *pc_written_out) {
+    u32  cond = opcode >> 28;
+    bool I    = (opcode >> 25) & 1;   /* 1 = register offset, 0 = immediate */
+    bool P    = (opcode >> 24) & 1;   /* 1 = pre-indexed */
+    bool U    = (opcode >> 23) & 1;   /* 1 = add offset */
+    bool B    = (opcode >> 22) & 1;   /* 1 = byte transfer */
+    bool W    = (opcode >> 21) & 1;   /* writeback */
+    bool L    = (opcode >> 20) & 1;   /* 1 = load */
+    u32  rn   = (opcode >> 16) & 0xF;
+    u32  rd   = (opcode >> 12) & 0xF;
+
+    /* Register-register shift not supported */
+    if (I && ((opcode >> 4) & 1)) return false;
+    /* Writeback to PC is unusual; let interpreter handle */
+    if (((P ? W : 1u)) && rn == REG_PC) return false;
+
+    cond_patch_t cp = emit_cond_begin(ptr, cond);
+
+    /* --- Load base into a0 --- */
+    if (rn == REG_PC)
+        emit_li32(ptr, RV_A0, pc + 8);
+    else
+        emit_load_reg(ptr, RV_A0, rn);
+
+    if (!I) {
+        /* Immediate 12-bit offset */
+        u32 imm12 = opcode & 0xFFF;
+        if (P) {
+            /* Pre-indexed: address = Rn ± imm12 */
+            if (imm12 != 0) {
+                if (U) {
+                    if (imm12 <= 2047)
+                        emit32(ptr, rv_addi(RV_A0, RV_A0, (int)imm12));
+                    else {
+                        emit_li32(ptr, RV_T0, imm12);
+                        emit32(ptr, rv_add(RV_A0, RV_A0, RV_T0));
+                    }
+                } else {
+                    if (imm12 <= 2048)
+                        emit32(ptr, rv_addi(RV_A0, RV_A0, -(int)imm12));
+                    else {
+                        emit_li32(ptr, RV_T0, imm12);
+                        emit32(ptr, rv_sub(RV_A0, RV_A0, RV_T0));
+                    }
+                }
+            }
+            if (W) emit_store_reg(ptr, RV_A0, rn);  /* writeback before call */
+        } else {
+            /* Post-indexed: address = Rn; writeback = Rn ± imm12 before call */
+            if (imm12 != 0) {
+                if (U) {
+                    if (imm12 <= 2047)
+                        emit32(ptr, rv_addi(RV_T0, RV_A0, (int)imm12));
+                    else {
+                        emit_li32(ptr, RV_T0, imm12);
+                        emit32(ptr, rv_add(RV_T0, RV_A0, RV_T0));
+                    }
+                } else {
+                    if (imm12 <= 2048)
+                        emit32(ptr, rv_addi(RV_T0, RV_A0, -(int)imm12));
+                    else {
+                        emit_li32(ptr, RV_T0, imm12);
+                        emit32(ptr, rv_sub(RV_T0, RV_A0, RV_T0));
+                    }
+                }
+                emit_store_reg(ptr, RV_T0, rn);
+            }
+        }
+    } else {
+        /* Register offset with immediate shift */
+        u32 rm        = opcode & 0xF;
+        u32 shift_typ = (opcode >> 5) & 3;
+        u32 imm5      = (opcode >> 7) & 0x1F;
+
+        emit_load_reg(ptr, RV_T2, rm);
+        emit_shift_noc(ptr, RV_T2, RV_T2, shift_typ, imm5);  /* t2 = shifted Rm */
+
+        if (P) {
+            if (U) emit32(ptr, rv_add(RV_A0, RV_A0, RV_T2));
+            else   emit32(ptr, rv_sub(RV_A0, RV_A0, RV_T2));
+            if (W) emit_store_reg(ptr, RV_A0, rn);
+        } else {
+            if (U) emit32(ptr, rv_add(RV_T0, RV_A0, RV_T2));
+            else   emit32(ptr, rv_sub(RV_T0, RV_A0, RV_T2));
+            emit_store_reg(ptr, RV_T0, rn);
+        }
+    }
+
+    /* --- Memory helper call --- */
+    if (L) {
+        uint32_t fn = B ? (uint32_t)(uintptr_t)execute_load_u8
+                        : (uint32_t)(uintptr_t)execute_load_u32;
+        emit_call32(ptr, fn);
+        if (rd == REG_PC) {
+            emit_store_reg(ptr, RV_A0, REG_PC);
+            *pc_written_out = true;
+        } else {
+            emit_store_reg(ptr, RV_A0, rd);
+        }
+    } else {
+        /* STR: for PC as source, ARM stores instruction + 12 */
+        if (rd == REG_PC)
+            emit_li32(ptr, RV_A1, pc + 12);
+        else
+            emit_load_reg(ptr, RV_A1, rd);
+        uint32_t fn = B ? (uint32_t)(uintptr_t)execute_store_u8
+                        : (uint32_t)(uintptr_t)execute_store_u32;
+        emit_call32(ptr, fn);
+    }
+
+    emit_cond_end(ptr, cp);
+    return true;
+}
+
+/* ── Halfword / signed-byte load/store translator ────────────────────────── *
+ * Handles LDRH/STRH/LDRSB/LDRSH (bits 27:25 = 000, bit 7 = 1, bit 4 = 1,
+ * bits 6:5 != 00).
+ *
+ * Offset encoding differs from single-register:
+ *   bit 22 = 0: register Rm (bits 3:0), no shift
+ *   bit 22 = 1: immediate (bits 11:8 | bits 3:0), max 255
+ * -------------------------------------------------------------------------- */
+
+static bool translate_halfword_ldrstr(u8 **ptr, u32 opcode, u32 pc,
+                                      bool *pc_written_out) {
+    u32  cond  = opcode >> 28;
+    bool P     = (opcode >> 24) & 1;
+    bool U     = (opcode >> 23) & 1;
+    bool H_imm = (opcode >> 22) & 1;  /* 1 = immediate offset */
+    bool W     = (opcode >> 21) & 1;
+    bool L     = (opcode >> 20) & 1;
+    u32  rn    = (opcode >> 16) & 0xF;
+    u32  rd    = (opcode >> 12) & 0xF;
+    u32  type  = (opcode >> 5) & 3;   /* 01=STRH/LDRH, 10=LDRSB, 11=LDRSH */
+
+    if (type == 0) return false;
+
+    if (((P ? W : 1u)) && rn == REG_PC) return false;
+
+    cond_patch_t cp = emit_cond_begin(ptr, cond);
+
+    if (rn == REG_PC)
+        emit_li32(ptr, RV_A0, pc + 8);
+    else
+        emit_load_reg(ptr, RV_A0, rn);
+
+    if (H_imm) {
+        /* Immediate 8-bit offset: bits 11:8 (high nibble) | bits 3:0 */
+        u32 imm8 = ((opcode >> 4) & 0xF0) | (opcode & 0xF);
+        if (P) {
+            if (imm8 != 0) {
+                if (U)
+                    emit32(ptr, rv_addi(RV_A0, RV_A0, (int)imm8));
+                else
+                    emit32(ptr, rv_addi(RV_A0, RV_A0, -(int)imm8));
+            }
+            if (W) emit_store_reg(ptr, RV_A0, rn);
+        } else {
+            if (imm8 != 0) {
+                if (U)
+                    emit32(ptr, rv_addi(RV_T0, RV_A0, (int)imm8));
+                else
+                    emit32(ptr, rv_addi(RV_T0, RV_A0, -(int)imm8));
+                emit_store_reg(ptr, RV_T0, rn);
+            }
+        }
+    } else {
+        /* Register offset (no shift for halfword transfers) */
+        u32 rm = opcode & 0xF;
+        emit_load_reg(ptr, RV_T2, rm);
+        if (P) {
+            if (U) emit32(ptr, rv_add(RV_A0, RV_A0, RV_T2));
+            else   emit32(ptr, rv_sub(RV_A0, RV_A0, RV_T2));
+            if (W) emit_store_reg(ptr, RV_A0, rn);
+        } else {
+            if (U) emit32(ptr, rv_add(RV_T0, RV_A0, RV_T2));
+            else   emit32(ptr, rv_sub(RV_T0, RV_A0, RV_T2));
+            emit_store_reg(ptr, RV_T0, rn);
+        }
+    }
+
+    if (L) {
+        uint32_t fn;
+        switch (type) {
+        case 1: fn = (uint32_t)(uintptr_t)execute_load_u16; break;
+        case 2: fn = (uint32_t)(uintptr_t)execute_load_s8;  break;
+        case 3: fn = (uint32_t)(uintptr_t)execute_load_s16; break;
+        default: emit_cond_end(ptr, cp); return false;
+        }
+        emit_call32(ptr, fn);
+        if (rd == REG_PC) {
+            emit_store_reg(ptr, RV_A0, REG_PC);
+            *pc_written_out = true;
+        } else {
+            emit_store_reg(ptr, RV_A0, rd);
+        }
+    } else {
+        if (type != 1) { emit_cond_end(ptr, cp); return false; }  /* only STRH */
+        if (rd == REG_PC)
+            emit_li32(ptr, RV_A1, pc + 12);
+        else
+            emit_load_reg(ptr, RV_A1, rd);
+        emit_call32(ptr, (uint32_t)(uintptr_t)execute_store_u16);
+    }
+
+    emit_cond_end(ptr, cp);
+    return true;
+}
+
+/* ── LDM/STM JIT emission wrapper ────────────────────────────────────────── *
+ * Emits a call to execute_ldm_stm() and sets *pc_written_out for LDM with PC.
+ * Returns false if the instruction cannot be translated (S-bit set).
+ * The block ALWAYS terminates after this emitter regardless of return value.
+ * -------------------------------------------------------------------------- */
+
+static bool translate_ldm_stm(u8 **ptr, u32 opcode, u32 cur_pc,
+                               bool *pc_written_out) {
+    bool S = (opcode >> 22) & 1;
+    bool L = (opcode >> 20) & 1;
+    u32 reglist = opcode & 0xFFFF;
+
+    /* S-bit: involves banked registers or SPSR restore; defer to interpreter */
+    if (S) return false;
+
+    u32 cond = opcode >> 28;
+    cond_patch_t cp = emit_cond_begin(ptr, cond);
+
+    /* Set reg[REG_PC] = instruction_pc + 4 before the call so that STM with
+     * PC stores instruction_pc + 8, matching ARM7 pipeline semantics. */
+    emit_li32(ptr, RV_T0, cur_pc + 4);
+    emit_store_reg(ptr, RV_T0, REG_PC);
+
+    emit_li32(ptr, RV_A0, opcode);
+    emit_call32(ptr, (uint32_t)(uintptr_t)execute_ldm_stm);
+
+    emit_cond_end(ptr, cp);
+
+    *pc_written_out = L && ((reglist >> REG_PC) & 1);
+    return true;
+}
+
+/* ── Data-processing classifier ─────────────────────────────────────────── */
 
 /* True iff opcode is a data-processing instruction we can attempt to translate.
  * Bits 27:26 = 00, not multiply/halfword, not MRS/MSR. */
@@ -571,7 +958,6 @@ bool translate_block_arm(u32 pc, bool ram_region) {
     u8  *block_start = *cache;
     u32  start_pc    = pc;
 
-    /* Write PC tag for collision detection */
     *(u32 *)(*cache) = pc;
     *cache += JIT_TAG_SIZE;
 
@@ -581,7 +967,6 @@ bool translate_block_arm(u32 pc, bool ram_region) {
     u32  cur_pc       = pc;
     bool pc_written   = false;
 
-    /* Sequential wait-state cycles for this ROM bank */
     int per_cycle = ws_cyc_seq[(pc >> 15 >> 9) & 0xF][1];
     if (per_cycle < 1) per_cycle = 1;
 
@@ -590,28 +975,48 @@ bool translate_block_arm(u32 pc, bool ram_region) {
             break;
 
         u32 opcode = jit_read_arm_opcode(cur_pc);
-        u32 rd     = (opcode >> 12) & 0xF;
-
-        if (!is_data_proc(opcode)) break;
-
         u8 *before = *cache;
-        if (!translate_data_proc(cache, opcode, cur_pc)) {
-            *cache = before;
-            break;
-        }
 
-        block_cycles += per_cycle;
-        cur_pc       += 4;
+        if (is_data_proc(opcode)) {
+            u32 rd = (opcode >> 12) & 0xF;
+            if (!translate_data_proc(cache, opcode, cur_pc)) {
+                *cache = before;
+                break;
+            }
+            block_cycles += per_cycle;
+            cur_pc += 4;
+            if (rd == REG_PC) { pc_written = true; break; }
 
-        if (rd == REG_PC) {
-            /* Data proc wrote to PC: block ends here, PC already in reg[] */
-            pc_written = true;
-            break;
+        } else if (is_single_ldrstr(opcode)) {
+            if (!translate_single_ldrstr(cache, opcode, cur_pc, &pc_written)) {
+                *cache = before;
+                break;
+            }
+            block_cycles += per_cycle;
+            cur_pc += 4;
+            if (pc_written) break;
+
+        } else if (is_halfword_ldrstr(opcode)) {
+            if (!translate_halfword_ldrstr(cache, opcode, cur_pc, &pc_written)) {
+                *cache = before;
+                break;
+            }
+            block_cycles += per_cycle;
+            cur_pc += 4;
+            if (pc_written) break;
+
+        } else if (is_ldm_stm(opcode)) {
+            if (!translate_ldm_stm(cache, opcode, cur_pc, &pc_written)) break;
+            block_cycles += per_cycle;
+            cur_pc += 4;
+            break;  /* always end block after LDM/STM */
+
+        } else {
+            break;  /* unknown → interpreter handles it */
         }
     }
 
     if (block_cycles == 0) {
-        /* Nothing was translated; reclaim tag + prologue */
         *cache = block_start;
         return false;
     }
