@@ -173,6 +173,13 @@ static u32 jit_read_arm_opcode(u32 pc) {
     return readaddress32(blk, pc & 0x7FFF);
 }
 
+static u16 jit_read_thumb_opcode(u32 pc) {
+    u32 region = (pc >> 15) & 0x1FFF;
+    u8 *blk    = memory_map_read[region];
+    if (!blk) return 0x46C0u;  /* MOV r8, r8 = NOP */
+    return readaddress16(blk, pc & 0x7FFF);
+}
+
 /* ── Region classification ──────────────────────────────────────────────── */
 
 static bool is_rom_region(u32 pc) {
@@ -300,25 +307,30 @@ static void emit_cond_end(u8 **end_ptr, cond_patch_t cp) {
 
 /* ── Block prologue / epilogue ──────────────────────────────────────────── */
 
-/* Stack frame layout (sp-16 allocated in prologue):
- *   sp+12 : caller's s0 (C outer loop uses s0 = &reg[0])
- *   sp+8  : caller's s1 (C outer loop uses s1 = cycles_remaining)
- * We must save/restore s0/s1 because the JIT uses them for its own
- * convention (JIT_CYCLES=s0, JIT_REG_BASE=s1) and the RISC-V ABI
- * requires callees to preserve callee-saved registers. */
+/* Stack frame layout (sp-32 allocated in prologue):
+ *   sp+28 : caller's RA  — MUST be saved because emit_call32 uses jalr+ra to
+ *                           call C helpers, which clobbers RA.  Any taken-path
+ *                           epilogue ends with `ret` (= jalr x0,ra,0); without
+ *                           saving RA it would jump back into the middle of the
+ *                           JIT block instead of returning to the C dispatcher.
+ *   sp+24 : caller's s0  (JIT_CYCLES)
+ *   sp+20 : caller's s1  (JIT_REG_BASE)
+ */
 
 static void emit_block_prologue(u8 **ptr) {
-    emit32(ptr, rv_addi(RV_SP, RV_SP, -16));              /* allocate frame */
-    emit32(ptr, rv_sw(RV_S0, RV_SP, 12));                 /* save caller s0 */
-    emit32(ptr, rv_sw(RV_S1, RV_SP, 8));                  /* save caller s1 */
+    emit32(ptr, rv_addi(RV_SP, RV_SP, -32));              /* allocate frame */
+    emit32(ptr, rv_sw(RV_RA, RV_SP, 28));                 /* save return addr */
+    emit32(ptr, rv_sw(RV_S0, RV_SP, 24));                 /* save caller s0 */
+    emit32(ptr, rv_sw(RV_S1, RV_SP, 20));                 /* save caller s1 */
     emit_li32(ptr, JIT_REG_BASE, (u32)(uintptr_t)&reg[0]);
     emit32(ptr, rv_lw(JIT_CYCLES, JIT_REG_BASE, REG_SAVE * 4));
 }
 
 static void emit_restore_callee_regs(u8 **ptr) {
-    emit32(ptr, rv_lw(RV_S1, RV_SP, 8));                  /* restore caller s1 */
-    emit32(ptr, rv_lw(RV_S0, RV_SP, 12));                 /* restore caller s0 */
-    emit32(ptr, rv_addi(RV_SP, RV_SP, 16));               /* free frame */
+    emit32(ptr, rv_lw(RV_S1, RV_SP, 20));                 /* restore caller s1 */
+    emit32(ptr, rv_lw(RV_S0, RV_SP, 24));                 /* restore caller s0 */
+    emit32(ptr, rv_lw(RV_RA, RV_SP, 28));                 /* restore return addr */
+    emit32(ptr, rv_addi(RV_SP, RV_SP, 32));               /* free frame */
 }
 
 /* Used for normal block end (next_pc = first uncompiled instruction). */
@@ -1197,9 +1209,716 @@ bool translate_block_arm(u32 pc, bool ram_region) {
     return true;
 }
 
+/* ── Phase E: Thumb block translator ────────────────────────────────────────
+ * Translates a Thumb-mode basic block starting at pc into RISC-V machine code.
+ * Uses pc|1 as the 4-byte tag so the hash slot distinguishes Thumb from ARM
+ * blocks at the same HASH_IDX (HASH_IDX discards the low 2 bits).
+ * -------------------------------------------------------------------------- */
 bool translate_block_thumb(u32 pc, bool ram_region) {
-    (void)pc; (void)ram_region;
-    return false;  /* Phase E */
+    if (!is_rom_region(pc)) return false;
+    (void)ram_region;
+
+    u8 **cache = &rom_translation_ptr;
+    u8  *end   = rom_translation_cache + ROM_TRANSLATION_CACHE_SIZE;
+
+    if (*cache + JIT_TAG_SIZE + TRANSLATION_CACHE_LIMIT_THRESHOLD >= end) {
+        flush_translation_cache_rom();
+        if (*cache + JIT_TAG_SIZE + TRANSLATION_CACHE_LIMIT_THRESHOLD >= end)
+            return false;
+    }
+
+    pc &= ~1u;
+    u8  *block_start = *cache;
+    u32  start_pc    = pc;
+
+    *(u32 *)(*cache) = pc | 1u;   /* Thumb tag */
+    *cache += JIT_TAG_SIZE;
+
+    emit_block_prologue(cache);
+
+    int  block_cycles = 0;
+    u32  cur_pc       = pc;
+    bool pc_written   = false;
+    bool done         = false;
+
+    int per_cycle = ws_cyc_seq[(pc >> 24) & 0xF][0]; /* 16-bit sequential */
+    if (per_cycle < 1) per_cycle = 1;
+
+    while (!done) {
+        if ((size_t)(*cache - block_start) > TRANSLATION_CACHE_LIMIT_THRESHOLD - 512u)
+            break;
+
+        u16 opcode = jit_read_thumb_opcode(cur_pc);
+        int key    = (opcode >> 8) & 0xFF;
+
+        switch (key) {
+
+        /* ── Shift-by-immediate ─────────────────────────────────────────── */
+
+        case 0x00 ... 0x07: { /* LSL rd, rs, imm */
+            u32 imm = (opcode >> 6) & 0x1F;
+            u32 rs  = (opcode >> 3) & 7;
+            u32 rd  = opcode & 7;
+            emit_load_reg(cache, RV_T0, rs);
+            if (imm == 0) {
+                emit32(cache, rv_addi(RV_T2, RV_T0, 0));   /* MOV */
+            } else {
+                emit32(cache, rv_srli(RV_T3, RV_T0, 32 - imm));
+                emit32(cache, rv_andi(RV_T3, RV_T3, 1));
+                emit_store_reg(cache, RV_T3, REG_C_FLAG);
+                emit32(cache, rv_slli(RV_T2, RV_T0, imm));
+            }
+            emit_flags_nz(cache, RV_T2);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x08 ... 0x0F: { /* LSR rd, rs, imm */
+            u32 imm = (opcode >> 6) & 0x1F;
+            u32 rs  = (opcode >> 3) & 7;
+            u32 rd  = opcode & 7;
+            if (imm == 0) { done = true; break; } /* LSR #32 edge case */
+            emit_load_reg(cache, RV_T0, rs);
+            emit32(cache, rv_srli(RV_T3, RV_T0, imm - 1));
+            emit32(cache, rv_andi(RV_T3, RV_T3, 1));
+            emit_store_reg(cache, RV_T3, REG_C_FLAG);
+            emit32(cache, rv_srli(RV_T2, RV_T0, imm));
+            emit_flags_nz(cache, RV_T2);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x10 ... 0x17: { /* ASR rd, rs, imm */
+            u32 imm = (opcode >> 6) & 0x1F;
+            u32 rs  = (opcode >> 3) & 7;
+            u32 rd  = opcode & 7;
+            if (imm == 0) { done = true; break; } /* ASR #32 edge case */
+            emit_load_reg(cache, RV_T0, rs);
+            emit32(cache, rv_srli(RV_T3, RV_T0, imm - 1));
+            emit32(cache, rv_andi(RV_T3, RV_T3, 1));
+            emit_store_reg(cache, RV_T3, REG_C_FLAG);
+            emit32(cache, rv_srai(RV_T2, RV_T0, imm));
+            emit_flags_nz(cache, RV_T2);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+
+        /* ── 3-operand add/sub ──────────────────────────────────────────── */
+
+        case 0x18:
+        case 0x19: { /* ADD rd, rs, rn */
+            u32 rn = (opcode >> 6) & 7;
+            u32 rs = (opcode >> 3) & 7;
+            u32 rd = opcode & 7;
+            emit_load_reg(cache, RV_T0, rs);
+            emit_load_reg(cache, RV_T1, rn);
+            emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+            emit_flags_add(cache);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x1A:
+        case 0x1B: { /* SUB rd, rs, rn */
+            u32 rn = (opcode >> 6) & 7;
+            u32 rs = (opcode >> 3) & 7;
+            u32 rd = opcode & 7;
+            emit_load_reg(cache, RV_T0, rs);
+            emit_load_reg(cache, RV_T1, rn);
+            emit32(cache, rv_sub(RV_T2, RV_T0, RV_T1));
+            emit_flags_sub(cache);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x1C:
+        case 0x1D: { /* ADD rd, rs, imm3 */
+            u32 imm = (opcode >> 6) & 7;
+            u32 rs  = (opcode >> 3) & 7;
+            u32 rd  = opcode & 7;
+            emit_load_reg(cache, RV_T0, rs);
+            emit_li32(cache, RV_T1, imm);
+            emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+            emit_flags_add(cache);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x1E:
+        case 0x1F: { /* SUB rd, rs, imm3 */
+            u32 imm = (opcode >> 6) & 7;
+            u32 rs  = (opcode >> 3) & 7;
+            u32 rd  = opcode & 7;
+            emit_load_reg(cache, RV_T0, rs);
+            emit_li32(cache, RV_T1, imm);
+            emit32(cache, rv_sub(RV_T2, RV_T0, RV_T1));
+            emit_flags_sub(cache);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+
+        /* ── Imm8 group ─────────────────────────────────────────────────── */
+
+        case 0x20 ... 0x27: { /* MOV rd, imm8 */
+            u32 rd  = (opcode >> 8) & 7;
+            u32 imm = opcode & 0xFF;
+            emit_li32(cache, RV_T2, imm);
+            emit_flags_nz(cache, RV_T2);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x28 ... 0x2F: { /* CMP rd, imm8 */
+            u32 rd  = (opcode >> 8) & 7;
+            u32 imm = opcode & 0xFF;
+            emit_load_reg(cache, RV_T0, rd);
+            emit_li32(cache, RV_T1, imm);
+            emit32(cache, rv_sub(RV_T2, RV_T0, RV_T1));
+            emit_flags_sub(cache);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x30 ... 0x37: { /* ADD rd, imm8 */
+            u32 rd  = (opcode >> 8) & 7;
+            u32 imm = opcode & 0xFF;
+            emit_load_reg(cache, RV_T0, rd);
+            emit_li32(cache, RV_T1, imm);
+            emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+            emit_flags_add(cache);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x38 ... 0x3F: { /* SUB rd, imm8 */
+            u32 rd  = (opcode >> 8) & 7;
+            u32 imm = opcode & 0xFF;
+            emit_load_reg(cache, RV_T0, rd);
+            emit_li32(cache, RV_T1, imm);
+            emit32(cache, rv_sub(RV_T2, RV_T0, RV_T1));
+            emit_flags_sub(cache);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+
+        /* ── ALU group ──────────────────────────────────────────────────── */
+
+        case 0x40: { /* AND/EOR/LSL-reg/LSR-reg */
+            int sub = (opcode >> 6) & 3;
+            int rs  = (opcode >> 3) & 7;
+            int rd  = opcode & 7;
+            if (sub >= 2) { done = true; break; }   /* reg shifts: defer */
+            emit_load_reg(cache, RV_T0, rd);
+            emit_load_reg(cache, RV_T1, rs);
+            if (sub == 0) emit32(cache, rv_and(RV_T2, RV_T0, RV_T1));
+            else          emit32(cache, rv_xor(RV_T2, RV_T0, RV_T1));
+            emit_flags_nz(cache, RV_T2);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x41: /* ASR-reg/ADC/SBC/ROR: carry-in or reg shift → defer */
+            done = true; break;
+        case 0x42: { /* TST/NEG/CMP/CMN */
+            int sub = (opcode >> 6) & 3;
+            int rs  = (opcode >> 3) & 7;
+            int rd  = opcode & 7;
+            switch (sub) {
+            case 0: /* TST */
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_and(RV_T2, RV_T0, RV_T1));
+                emit_flags_nz(cache, RV_T2);
+                break;
+            case 1: /* NEG: rd = 0 - rs */
+                emit32(cache, rv_addi(RV_T0, RV_ZERO, 0));
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_sub(RV_T2, RV_T0, RV_T1));
+                emit_flags_sub(cache);
+                emit_store_reg(cache, RV_T2, rd);
+                break;
+            case 2: /* CMP */
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_sub(RV_T2, RV_T0, RV_T1));
+                emit_flags_sub(cache);
+                break;
+            case 3: /* CMN */
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+                emit_flags_add(cache);
+                break;
+            }
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x43: { /* ORR/MUL/BIC/MVN */
+            int sub = (opcode >> 6) & 3;
+            int rs  = (opcode >> 3) & 7;
+            int rd  = opcode & 7;
+            if (sub == 0) {
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_or(RV_T2, RV_T0, RV_T1));
+            } else if (sub == 1) {
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_mul(RV_T2, RV_T0, RV_T1));
+            } else if (sub == 2) {
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_xori(RV_T1, RV_T1, -1));
+                emit32(cache, rv_and(RV_T2, RV_T0, RV_T1));
+            } else {
+                emit_load_reg(cache, RV_T1, rs);
+                emit32(cache, rv_xori(RV_T2, RV_T1, -1));
+            }
+            emit_flags_nz(cache, RV_T2);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+
+        /* ── Hi-register operations ─────────────────────────────────────── */
+
+        case 0x44: { /* ADD hi-reg: rd = rd + rs (no flags) */
+            int rs = (opcode >> 3) & 0xF;
+            int rd = ((opcode >> 4) & 8) | (opcode & 7);
+            if (rs == REG_PC) emit_li32(cache, RV_T1, cur_pc + 4);
+            else               emit_load_reg(cache, RV_T1, rs);
+            if (rd == REG_PC)  emit_li32(cache, RV_T0, cur_pc + 4);
+            else               emit_load_reg(cache, RV_T0, rd);
+            emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+            if (rd == REG_PC) {
+                emit32(cache, rv_andi(RV_T2, RV_T2, -2));
+                emit_store_reg(cache, RV_T2, REG_PC);
+                block_cycles += per_cycle; cur_pc += 2;
+                pc_written = true; done = true;
+            } else {
+                emit_store_reg(cache, RV_T2, rd);
+                block_cycles += per_cycle; cur_pc += 2;
+            }
+            break;
+        }
+        case 0x45: { /* CMP hi-reg */
+            int rs = (opcode >> 3) & 0xF;
+            int rd = ((opcode >> 4) & 8) | (opcode & 7);
+            if (rs == REG_PC) emit_li32(cache, RV_T1, cur_pc + 4);
+            else               emit_load_reg(cache, RV_T1, rs);
+            if (rd == REG_PC)  emit_li32(cache, RV_T0, cur_pc + 4);
+            else               emit_load_reg(cache, RV_T0, rd);
+            emit32(cache, rv_sub(RV_T2, RV_T0, RV_T1));
+            emit_flags_sub(cache);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0x46: { /* MOV hi-reg */
+            int rs = (opcode >> 3) & 0xF;
+            int rd = ((opcode >> 4) & 8) | (opcode & 7);
+            if (rs == REG_PC) emit_li32(cache, RV_T2, cur_pc + 4);
+            else               emit_load_reg(cache, RV_T2, rs);
+            if (rd == REG_PC) {
+                emit32(cache, rv_andi(RV_T2, RV_T2, -2));
+                emit_store_reg(cache, RV_T2, REG_PC);
+                block_cycles += per_cycle; cur_pc += 2;
+                pc_written = true; done = true;
+            } else {
+                emit_store_reg(cache, RV_T2, rd);
+                block_cycles += per_cycle; cur_pc += 2;
+            }
+            break;
+        }
+        case 0x47: { /* BX rs */
+            int rs = (opcode >> 3) & 0xF;
+            if (rs == REG_PC) emit_li32(cache, RV_T0, cur_pc + 4);
+            else               emit_load_reg(cache, RV_T0, rs);
+            /* Update CPSR T-bit from bit 0 of the branch target */
+            emit_load_reg(cache, RV_T1, REG_CPSR);
+            emit32(cache, rv_andi(RV_T2, RV_T0, 1));
+            emit32(cache, rv_andi(RV_T1, RV_T1, -33));   /* clear bit 5 (T) */
+            emit32(cache, rv_slli(RV_T2, RV_T2, 5));
+            emit32(cache, rv_or(RV_T1, RV_T1, RV_T2));
+            emit_store_reg(cache, RV_T1, REG_CPSR);
+            emit32(cache, rv_andi(RV_T0, RV_T0, -2));
+            emit_store_reg(cache, RV_T0, REG_PC);
+            block_cycles += per_cycle; cur_pc += 2;
+            pc_written = true; done = true;
+            break;
+        }
+
+        /* ── PC-relative load ───────────────────────────────────────────── */
+
+        case 0x48 ... 0x4F: { /* LDR rd, [pc + imm*4] */
+            u32 rd   = (opcode >> 8) & 7;
+            u32 imm  = opcode & 0xFF;
+            u32 addr = (cur_pc & ~2u) + 4u + imm * 4u;
+            emit_li32(cache, RV_A0, addr);
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+
+        /* ── Memory with register offset ────────────────────────────────── */
+
+        case 0x50:
+        case 0x51: { /* STR [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_load_reg(cache, RV_A1, rd);
+            emit_call32(cache, (u32)(uintptr_t)execute_store_u32);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x52:
+        case 0x53: { /* STRH [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_load_reg(cache, RV_A1, rd);
+            emit_call32(cache, (u32)(uintptr_t)execute_store_u16);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x54:
+        case 0x55: { /* STRB [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_load_reg(cache, RV_A1, rd);
+            emit_call32(cache, (u32)(uintptr_t)execute_store_u8);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x56:
+        case 0x57: { /* LDSB [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_call32(cache, (u32)(uintptr_t)execute_load_s8);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x58:
+        case 0x59: { /* LDR [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x5A:
+        case 0x5B: { /* LDRH [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u16);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x5C:
+        case 0x5D: { /* LDRB [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u8);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x5E:
+        case 0x5F: { /* LDSH [rb+ro] */
+            u32 ro = (opcode >> 6) & 7, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            emit_load_reg(cache, RV_A0, rb);
+            emit_load_reg(cache, RV_T0, ro);
+            emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
+            emit_call32(cache, (u32)(uintptr_t)execute_load_s16);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+
+        /* ── Memory with immediate offset ───────────────────────────────── */
+
+#define THUMB_ADDR_IMM(rb_, off_)                                         \
+        emit_load_reg(cache, RV_A0, (rb_));                               \
+        if ((off_) != 0) {                                                \
+            if ((off_) <= 2047u)                                          \
+                emit32(cache, rv_addi(RV_A0, RV_A0, (int)(off_)));       \
+            else {                                                        \
+                emit_li32(cache, RV_T0, (off_));                          \
+                emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));              \
+            }                                                             \
+        }
+
+        case 0x60 ... 0x67: { /* STR [rb+imm*4] */
+            u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            THUMB_ADDR_IMM(rb, imm * 4u);
+            emit_load_reg(cache, RV_A1, rd);
+            emit_call32(cache, (u32)(uintptr_t)execute_store_u32);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x68 ... 0x6F: { /* LDR [rb+imm*4] */
+            u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            THUMB_ADDR_IMM(rb, imm * 4u);
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x70 ... 0x77: { /* STRB [rb+imm] */
+            u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            THUMB_ADDR_IMM(rb, imm);
+            emit_load_reg(cache, RV_A1, rd);
+            emit_call32(cache, (u32)(uintptr_t)execute_store_u8);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x78 ... 0x7F: { /* LDRB [rb+imm] */
+            u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            THUMB_ADDR_IMM(rb, imm);
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u8);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x80 ... 0x87: { /* STRH [rb+imm*2] */
+            u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            THUMB_ADDR_IMM(rb, imm * 2u);
+            emit_load_reg(cache, RV_A1, rd);
+            emit_call32(cache, (u32)(uintptr_t)execute_store_u16);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x88 ... 0x8F: { /* LDRH [rb+imm*2] */
+            u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
+            THUMB_ADDR_IMM(rb, imm * 2u);
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u16);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+#undef THUMB_ADDR_IMM
+
+        /* ── SP-relative load/store ──────────────────────────────────────── */
+
+        case 0x90 ... 0x97: { /* STR rd, [sp+imm*4] */
+            u32 rd = (opcode >> 8) & 7, imm = opcode & 0xFF;
+            emit_load_reg(cache, RV_A0, REG_SP);
+            u32 off = imm * 4u;
+            if (off <= 2047u) emit32(cache, rv_addi(RV_A0, RV_A0, (int)off));
+            else { emit_li32(cache, RV_T0, off); emit32(cache, rv_add(RV_A0, RV_A0, RV_T0)); }
+            emit_load_reg(cache, RV_A1, rd);
+            emit_call32(cache, (u32)(uintptr_t)execute_store_u32);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+        case 0x98 ... 0x9F: { /* LDR rd, [sp+imm*4] */
+            u32 rd = (opcode >> 8) & 7, imm = opcode & 0xFF;
+            emit_load_reg(cache, RV_A0, REG_SP);
+            u32 off = imm * 4u;
+            if (off <= 2047u) emit32(cache, rv_addi(RV_A0, RV_A0, (int)off));
+            else { emit_li32(cache, RV_T0, off); emit32(cache, rv_add(RV_A0, RV_A0, RV_T0)); }
+            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
+            emit_store_reg(cache, RV_A0, rd);
+            block_cycles += per_cycle; cur_pc += 2; break;
+        }
+
+        /* ── ADD pc/sp ──────────────────────────────────────────────────── */
+
+        case 0xA0 ... 0xA7: { /* ADD rd, pc, imm*4 (compile-time constant) */
+            u32 rd  = (opcode >> 8) & 7;
+            u32 imm = opcode & 0xFF;
+            emit_li32(cache, RV_T2, (cur_pc & ~2u) + 4u + imm * 4u);
+            emit_store_reg(cache, RV_T2, rd);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0xA8 ... 0xAF: { /* ADD rd, sp, imm*4 */
+            u32 rd  = (opcode >> 8) & 7;
+            u32 off = (u32)(opcode & 0xFF) * 4u;
+            emit_load_reg(cache, RV_T0, REG_SP);
+            if (off == 0) {
+                emit_store_reg(cache, RV_T0, rd);
+            } else if (off <= 2047u) {
+                emit32(cache, rv_addi(RV_T2, RV_T0, (int)off));
+                emit_store_reg(cache, RV_T2, rd);
+            } else {
+                emit_li32(cache, RV_T1, off);
+                emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+                emit_store_reg(cache, RV_T2, rd);
+            }
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+
+        /* ── SP adjust ──────────────────────────────────────────────────── */
+
+        case 0xB0:
+        case 0xB1:
+        case 0xB2:
+        case 0xB3: { /* ADD/SUB sp, imm7*4 (max 508, always fits addi) */
+            u32 imm = (u32)(opcode & 0x7F) * 4u;
+            bool sub = (opcode >> 7) & 1;
+            emit_load_reg(cache, RV_T0, REG_SP);
+            if (sub) emit32(cache, rv_addi(RV_T0, RV_T0, -(int)imm));
+            else     emit32(cache, rv_addi(RV_T0, RV_T0,  (int)imm));
+            emit_store_reg(cache, RV_T0, REG_SP);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+
+        /* ── Block transfers (PUSH / POP / STMIA / LDMIA) ──────────────── */
+        /* Use synthetic ARM opcodes and execute_ldm_stm for correct writeback. */
+
+        case 0xB4: { /* PUSH rlist */
+            u32 arm_op = 0xE9200000u | ((u32)REG_SP << 16) | (u32)(opcode & 0xFF);
+            emit_li32(cache, RV_A0, arm_op);
+            emit_call32(cache, (u32)(uintptr_t)execute_ldm_stm);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0xB5: { /* PUSH rlist, LR */
+            u32 arm_op = 0xE9200000u | ((u32)REG_SP << 16) |
+                         ((u32)(opcode & 0xFF) | (1u << REG_LR));
+            emit_li32(cache, RV_A0, arm_op);
+            emit_call32(cache, (u32)(uintptr_t)execute_ldm_stm);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0xBC: { /* POP rlist (no PC) */
+            u32 arm_op = 0xE8B00000u | ((u32)REG_SP << 16) | (u32)(opcode & 0xFF);
+            emit_li32(cache, RV_A0, arm_op);
+            emit_call32(cache, (u32)(uintptr_t)execute_ldm_stm);
+            block_cycles += per_cycle; cur_pc += 2;
+            break;
+        }
+        case 0xBD: { /* POP rlist, PC */
+            u32 arm_op = 0xE8B00000u | ((u32)REG_SP << 16) |
+                         ((u32)(opcode & 0xFF) | (1u << REG_PC));
+            emit_li32(cache, RV_A0, arm_op);
+            emit_call32(cache, (u32)(uintptr_t)execute_ldm_stm);
+            /* Thumb POP PC: clear bit 0 of the loaded PC (stays Thumb) */
+            emit_load_reg(cache, RV_T0, REG_PC);
+            emit32(cache, rv_andi(RV_T0, RV_T0, -2));
+            emit_store_reg(cache, RV_T0, REG_PC);
+            block_cycles += per_cycle; cur_pc += 2;
+            pc_written = true; done = true;
+            break;
+        }
+        case 0xC0 ... 0xC7: { /* STMIA rb!, rlist */
+            u32 rb     = (opcode >> 8) & 7;
+            u32 arm_op = 0xE8A00000u | (rb << 16) | (u32)(opcode & 0xFF);
+            emit_li32(cache, RV_A0, arm_op);
+            emit_call32(cache, (u32)(uintptr_t)execute_ldm_stm);
+            block_cycles += per_cycle; cur_pc += 2;
+            done = true;
+            break;
+        }
+        case 0xC8 ... 0xCF: { /* LDMIA rb!, rlist */
+            u32 rb     = (opcode >> 8) & 7;
+            u32 arm_op = 0xE8B00000u | (rb << 16) | (u32)(opcode & 0xFF);
+            emit_li32(cache, RV_A0, arm_op);
+            emit_call32(cache, (u32)(uintptr_t)execute_ldm_stm);
+            block_cycles += per_cycle; cur_pc += 2;
+            done = true;
+            break;
+        }
+
+        /* ── Conditional branches (inline taken-path) ───────────────────── */
+
+        case 0xD0 ... 0xDD: {
+            u32 cond = (u32)(key & 0xF);
+            s32 off  = (s8)(opcode & 0xFF);
+            u32 taken_pc = (u32)((s32)cur_pc + off * 2 + 4);
+            block_cycles += per_cycle;
+            cur_pc += 2;
+            /* Emit taken path guarded by condition; not-taken falls through */
+            cond_patch_t cp = emit_cond_begin(cache, cond);
+            emit_li32(cache, RV_T0, taken_pc);
+            emit_store_reg(cache, RV_T0, REG_PC);
+            emit_block_epilogue_pc_written(cache, block_cycles);
+            emit_cond_end(cache, cp);
+            break;
+        }
+
+        /* ── Unconditional branch ────────────────────────────────────────── */
+
+        case 0xE0 ... 0xE7: { /* B label */
+            u32 off    = opcode & 0x7FF;
+            /* Arithmetic right-shift via s32 cast: logical would corrupt negative off */
+            s32 br_off = ((s32)(off << 21) >> 20) + 4;
+            u32 target = (u32)((s32)cur_pc + br_off);
+            emit_li32(cache, RV_T0, target);
+            emit_store_reg(cache, RV_T0, REG_PC);
+            block_cycles += per_cycle; cur_pc += 2;
+            pc_written = true; done = true;
+            break;
+        }
+
+        /* ── BL two-word call ────────────────────────────────────────────── */
+
+        case 0xF0 ... 0xF7: { /* BL Part 1: set LR high half */
+            u32 off1  = opcode & 0x7FF;
+            u16 p2    = jit_read_thumb_opcode(cur_pc + 2);
+            if (((p2 >> 8) & 0xFF) >= 0xF8) {
+                /* Combined BL: statically compute both LR and call target */
+                u32 off2    = p2 & 0x7FF;
+                s32 hi      = (s32)(off1 << 21) >> 9;   /* arithmetic right-shift for sign-extend ×4096 */
+                u32 lr_val  = (u32)((s32)cur_pc + 4 + hi);
+                u32 call_pc = lr_val + off2 * 2u;
+                u32 new_lr  = (cur_pc + 4u) | 1u;         /* return addr | Thumb */
+                emit_li32(cache, RV_T0, new_lr);
+                emit_store_reg(cache, RV_T0, REG_LR);
+                emit_li32(cache, RV_T0, call_pc);
+                emit_store_reg(cache, RV_T0, REG_PC);
+                block_cycles += per_cycle;   /* Part 1 */
+                block_cycles += per_cycle;   /* Part 2 */
+                cur_pc += 4;
+                pc_written = true; done = true;
+            } else {
+                /* Part 1 only — emit partial LR setup, continue translating */
+                s32 hi     = (s32)(off1 << 21) >> 9;
+                u32 lr_val = (u32)((s32)cur_pc + 4 + hi);
+                emit_li32(cache, RV_T0, lr_val);
+                emit_store_reg(cache, RV_T0, REG_LR);
+                block_cycles += per_cycle; cur_pc += 2;
+            }
+            break;
+        }
+
+        default: /* Unknown / SWI / BL Part 2 standalone: bail to interpreter */
+            done = true;
+            break;
+        }
+    }
+
+    if (block_cycles == 0) {
+        *cache = block_start;
+        return false;
+    }
+
+    if (pc_written)
+        emit_block_epilogue_pc_written(cache, block_cycles);
+    else
+        emit_block_epilogue(cache, cur_pc, block_cycles);
+
+#ifdef ESP_PLATFORM
+    {
+        size_t block_sz = (size_t)(*cache - block_start);
+        esp_cache_msync(block_start, block_sz,
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA |
+                        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        uint8_t *ia = (uint8_t *)((uintptr_t)block_start & ~63u);
+        uint8_t *ie = (uint8_t *)(((uintptr_t)block_start + block_sz + 63u) & ~63u);
+        esp_cache_msync(ia, (size_t)(ie - ia),
+                        ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST);
+    }
+#endif
+
+    rom_branch_hash[HASH_IDX(start_pc)] = (u32)(uintptr_t)block_start;
+    return true;
 }
 
 /* ── Block lookup ───────────────────────────────────────────────────────── */
@@ -1219,28 +1938,20 @@ u8 function_cc *block_lookup_address_arm(u32 pc) {
     return NULL;
 }
 
-u8 function_cc *block_lookup_address_thumb(u32 pc) { (void)pc; return NULL; }
-u8 function_cc *block_lookup_address_dual(u32 pc)  { (void)pc; return NULL; }
-
-/* ── Dispatch diagnostics ───────────────────────────────────────────────── */
-
-static volatile uint32_t diag_jit_blocks   = 0;
-static volatile uint32_t diag_fallback_thumb = 0;
-static volatile uint32_t diag_fallback_noblk = 0;
-static volatile uint32_t diag_fallback_irq   = 0;
-static volatile uint32_t diag_frames        = 0;
-
-#define DIAG_PRINT_INTERVAL 300  /* frames */
-
-static void diag_maybe_print(void) {
-    diag_frames++;
-    if (diag_frames % DIAG_PRINT_INTERVAL == 0) {
-        printf("[JIT] frames=%lu jit_blk=%lu fall_thumb=%lu fall_noblk=%lu fall_irq=%lu\n",
-               (unsigned long)diag_frames, (unsigned long)diag_jit_blocks,
-               (unsigned long)diag_fallback_thumb, (unsigned long)diag_fallback_noblk,
-               (unsigned long)diag_fallback_irq);
+u8 function_cc *block_lookup_address_thumb(u32 pc) {
+    pc &= ~1u;
+    u32 slot  = HASH_IDX(pc);
+    u8 *entry = (u8 *)(uintptr_t)rom_branch_hash[slot];
+    if (entry && *(u32 *)entry == (pc | 1u))
+        return entry + JIT_TAG_SIZE;
+    if (translate_block_thumb(pc, false)) {
+        entry = (u8 *)(uintptr_t)rom_branch_hash[slot];
+        if (entry && *(u32 *)entry == (pc | 1u))
+            return entry + JIT_TAG_SIZE;
     }
+    return NULL;
 }
+u8 function_cc *block_lookup_address_dual(u32 pc)  { (void)pc; return NULL; }
 
 /* ── Main dispatch loop ─────────────────────────────────────────────────── */
 
@@ -1251,34 +1962,31 @@ u32 execute_arm_translate(u32 cycles) {
      * Unpack into individual reg[REG_x_FLAG] slots for the JIT. */
     jit_extract_flags();
 
+    u32 blocks_this_call = 0;
+
     while (1) {
         if (reg[CPU_HALT_STATE] != CPU_ACTIVE) {
             jit_collapse_flags();
             u32 ret = update_gba(cycles_remaining);
-            if (completed_frame(ret)) {
-                diag_maybe_print();
+            if (completed_frame(ret))
                 return 0;
-            }
             cycles_remaining = (s32)cycles_to_run(ret);
             jit_extract_flags();
             continue;
         }
 
-        /* Thumb: hand off to interpreter until Phase E */
-        if (reg[REG_CPSR] & 0x20) {
-            diag_fallback_thumb++;
-            jit_collapse_flags();
-            execute_arm(cycles_remaining);
-            diag_maybe_print();
-            return 0;
-        }
-
         if (reg[REG_PC] == idle_loop_target_pc && cycles_remaining > 0)
             cycles_remaining = 0;
 
-        u8 *block = block_lookup_address_arm(reg[REG_PC]);
+        u8 *block;
+        bool is_thumb = (reg[REG_CPSR] & 0x20) != 0;
+        if (is_thumb)
+            block = block_lookup_address_thumb(reg[REG_PC]);
+        else
+            block = block_lookup_address_arm(reg[REG_PC]);
+
         if (block) {
-            diag_jit_blocks++;
+            blocks_this_call++;
             reg[REG_SAVE] = (u32)cycles_remaining;
             ((void (*)(void))block)();
             cycles_remaining = (s32)reg[REG_SAVE];
@@ -1286,28 +1994,31 @@ u32 execute_arm_translate(u32 cycles) {
             cpu_alert_type alert = check_interrupt();
             if (alert & CPU_ALERT_SMC) flush_dynarec_caches();
             if (alert & CPU_ALERT_IRQ) {
-                diag_fallback_irq++;
                 jit_collapse_flags();
                 execute_arm(cycles_remaining);
-                diag_maybe_print();
+                return 0;
+            }
+
+            /* Safety valve: if cycles haven't gone negative after a huge number
+             * of JIT blocks, something is wrong — fall back to the interpreter
+             * to guarantee frame completion. */
+            if (blocks_this_call >= 500000) {
+                jit_collapse_flags();
+                execute_arm(cycles_remaining);
                 return 0;
             }
         } else {
-            diag_fallback_noblk++;
-            /* BIOS, IWRAM code, or instruction type not yet translated */
+            /* BIOS, IWRAM, non-ROM, or instruction type not yet translated */
             jit_collapse_flags();
             execute_arm(cycles_remaining);
-            diag_maybe_print();
             return 0;
         }
 
         if (cycles_remaining <= 0) {
             jit_collapse_flags();
             u32 ret = update_gba(cycles_remaining);
-            if (completed_frame(ret)) {
-                diag_maybe_print();
+            if (completed_frame(ret))
                 return 0;
-            }
             cycles_remaining = (s32)cycles_to_run(ret);
             jit_extract_flags();
         }
