@@ -69,6 +69,7 @@ static float audio_samples_accumulator = 0.0f;
 #define FRAMESKIP_MAX 30
 
 u32 skip_next_frame                          = 0;
+u32 frontend_skip_next_frame                 = 0; /* set by retro-go frontend before retro_run() */
 static frameskip_type current_frameskip_type = no_frameskip;
 static u32 frameskip_threshold               = 0;
 static u32 frameskip_interval                = 0;
@@ -1300,8 +1301,9 @@ void retro_run(void)
    rumble_frame_reset();
 
    /* Check whether current frame should
-    * be skipped */
-   skip_next_frame = 0;
+    * be skipped. Start from the frontend override so the PPU guard in
+    * main_gpsp.c (update_scanline) and video_run() both see the right value. */
+   skip_next_frame = frontend_skip_next_frame;
 
    if (current_frameskip_type != no_frameskip)
    {

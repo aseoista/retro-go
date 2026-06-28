@@ -191,6 +191,10 @@ u32 function_cc update_gba(int remaining_cycles)
           if(reg[OAM_UPDATED])
             oam_update_count++;
 
+          /* Skip PPU rendering when frontend requested a skipped frame.
+           * video_reload_counters() at VBlank resets affine refs, so the
+           * next rendered frame is correct. */
+          if (!skip_next_frame) {
 #ifdef GBSP_PROFILE
           { int64_t _t2 = esp_timer_get_time();
 #endif
@@ -199,6 +203,7 @@ u32 function_cc update_gba(int remaining_cycles)
           prof_scanline_us += esp_timer_get_time() - _t2;
           prof_scanline_calls++; }
 #endif
+          }
 
           // Trigger the HBlank DMAs if enabled
           for (i = 0; i < 4; i++)

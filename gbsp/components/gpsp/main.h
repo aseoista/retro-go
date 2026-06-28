@@ -72,6 +72,7 @@ extern u32 frame_counter;
 extern u32 cpu_ticks;
 extern u32 execute_cycles;
 extern u32 skip_next_frame;
+extern u32 frontend_skip_next_frame;
 
 extern u32 flush_ram_count;
 

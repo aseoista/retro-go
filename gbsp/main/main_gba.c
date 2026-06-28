@@ -5,14 +5,25 @@
 #include <sys/stat.h>
 #include <libretro.h>
 
+#ifdef HAVE_DYNAREC
+extern int dynarec_enable;
+#endif
+extern uint32_t frontend_skip_next_frame;
+
 #define GBA_SCREEN_WIDTH    240
 #define GBA_SCREEN_HEIGHT   160
 #define GBA_SOUND_FREQUENCY 65536  // 64 * 1024 Hz
+
+#ifdef HAVE_DYNAREC
+static const char *SETTING_CPU_BACKEND = "cpu_backend";
+#endif
+static const char *SETTING_FRAMESKIP = "frameskip";
 
 static rg_app_t *app;
 static rg_surface_t *screen;
 static uint32_t current_joystick;
 static bool skip_video_frame = false;
+static int user_frameskip = 0; /* 0 = auto, 1+ = fixed */
 
 /* ---- libretro log callback ---- */
 
@@ -177,6 +188,44 @@ static void event_handler(int event, void *arg)
         rg_display_submit(screen, 0);
 }
 
+/* ---- emulator options ---- */
+
+#ifdef HAVE_DYNAREC
+static rg_gui_event_t cpu_backend_cb(rg_gui_option_t *option, rg_gui_event_t event)
+{
+    if (event == RG_DIALOG_PREV || event == RG_DIALOG_NEXT) {
+        dynarec_enable = !dynarec_enable;
+        rg_settings_set_number(NS_APP, SETTING_CPU_BACKEND, dynarec_enable);
+    }
+    strcpy(option->value, dynarec_enable ? "JIT" : "Interp");
+    return RG_DIALOG_VOID;
+}
+#endif
+
+static rg_gui_event_t frameskip_cb(rg_gui_option_t *option, rg_gui_event_t event)
+{
+    if (event == RG_DIALOG_PREV && user_frameskip > 0)
+        user_frameskip--;
+    else if (event == RG_DIALOG_NEXT && user_frameskip < 5)
+        user_frameskip++;
+    if (event == RG_DIALOG_PREV || event == RG_DIALOG_NEXT)
+        rg_settings_set_number(NS_APP, SETTING_FRAMESKIP, user_frameskip);
+    if (user_frameskip == 0)
+        strcpy(option->value, "Auto");
+    else
+        sprintf(option->value, "%d", user_frameskip);
+    return RG_DIALOG_VOID;
+}
+
+static void options_handler(rg_gui_option_t *dest)
+{
+#ifdef HAVE_DYNAREC
+    *dest++ = (rg_gui_option_t){0, "CPU backend", "-", RG_DIALOG_FLAG_NORMAL, &cpu_backend_cb};
+#endif
+    *dest++ = (rg_gui_option_t){0, "Frame skip", "-", RG_DIALOG_FLAG_NORMAL, &frameskip_cb};
+    *dest++ = (rg_gui_option_t)RG_DIALOG_END;
+}
+
 /* ---- SD card .gba scanner (Phase 1 debug helper) ---- */
 
 static void scan_gba(const char *path, int depth)
@@ -211,9 +260,17 @@ void app_main(void)
         .reset      = reset_handler,
         .screenshot = screenshot_handler,
         .event      = event_handler,
+        .options    = options_handler,
     };
 
     app = rg_system_reinit(GBA_SOUND_FREQUENCY, &handlers, NULL);
+
+#ifdef HAVE_DYNAREC
+    dynarec_enable = (int)rg_settings_get_number(NS_APP, SETTING_CPU_BACKEND, 1);
+#endif
+    user_frameskip = (int)rg_settings_get_number(NS_APP, SETTING_FRAMESKIP, 0);
+    /* Leave app->frameskip alone — the loop uses user_frameskip / elapsed directly.
+     * Auto-adjust in rg_system.c will modify app->frameskip but we ignore it. */
 
     retro_set_environment(env_cb);
     retro_set_video_refresh(video_refresh_cb);
@@ -266,6 +323,11 @@ void app_main(void)
     bool menu_pressed = false;
     bool menu_cancelled = false;
     int skipFrames = 0;
+    int64_t frame_pair_start = 0;   /* wall-clock start of the current render+skip group */
+
+    /* Diagnostic: accumulate render and skip frame times, print every 120 GBA frames. */
+    int64_t diag_render_sum = 0, diag_skip_sum = 0;
+    int diag_render_n = 0, diag_skip_n = 0, diag_frames = 0;
 
     while (1) {
         uint32_t joystick = rg_input_read_gamepad();
@@ -274,39 +336,80 @@ void app_main(void)
             if (!menu_cancelled) {
                 rg_task_delay(50);
                 rg_gui_game_menu();
+                skipFrames = 0;
             }
             menu_cancelled = false;
         } else if (joystick & RG_KEY_OPTION) {
             rg_gui_options_menu();
+            skipFrames = 0;
         }
 
         menu_pressed    = (joystick & RG_KEY_MENU) != 0;
         menu_cancelled |= menu_pressed && (joystick & ~RG_KEY_MENU);
 
         int64_t frame_start = rg_system_timer();
-        skip_video_frame = (skipFrames > 0);
+        bool rendering = (skipFrames == 0);
+
+        if (rendering)
+            frame_pair_start = frame_start;
+
+        /* Both flags must agree: frontend_skip_next_frame suppresses the PPU
+         * scanline renderer inside execute_arm(); skip_video_frame is the
+         * belt-and-suspenders guard on video_refresh_cb (data==NULL already
+         * covers it, but keep for clarity). */
+        frontend_skip_next_frame = rendering ? 0 : 1;
+        skip_video_frame = !rendering;
 
         retro_run();
 
-        rg_system_tick(rg_system_timer() - frame_start);
-#if 0
-        if (skipFrames == 0) {
-            int elapsed = rg_system_timer() - frame_start;
-            if (app->frameskip > 0)
-                skipFrames = app->frameskip;
+        int64_t elapsed = rg_system_timer() - frame_start;
+        rg_system_tick(elapsed);
+
+        /* Diagnostic accumulation */
+        if (rendering) { diag_render_sum += elapsed; diag_render_n++; }
+        else            { diag_skip_sum  += elapsed; diag_skip_n++;  }
+        if (++diag_frames >= 120) {
+            RG_LOGI("FSKIP: render=%dms(n=%d) skip=%dms(n=%d)\n",
+                (int)(diag_render_n ? diag_render_sum / diag_render_n / 1000 : -1), diag_render_n,
+                (int)(diag_skip_n  ? diag_skip_sum  / diag_skip_n  / 1000 : -1), diag_skip_n);
+            diag_render_sum = diag_skip_sum = 0;
+            diag_render_n = diag_skip_n = diag_frames = 0;
+        }
+
+        if (rendering) {
+            /* Drive skip count from user setting (fixed) or elapsed time (auto).
+             * Deliberately ignore app->frameskip: the framework auto-adjust would
+             * push it to 5 since GBA never reaches 96% speed, giving ~10fps display.
+             * In auto mode: skip one frame when this render was slow (> frameTime).
+             * The pair-based sleep below then paces the render+skip group correctly. */
+            if (user_frameskip > 0)
+                skipFrames = user_frameskip;
             else if (elapsed > app->frameTime + 1500)
                 skipFrames = 1;
-        } else if (skipFrames > 0) {
-            skipFrames--;
-        }
-#endif
 #ifdef RG_TARGET_SMARTBOX86
-        /* ES8311 DMA buffer doesn't provide frame-pacing backpressure; pace explicitly. */
-        {
-            int64_t elapsed = rg_system_timer() - frame_start;
-            if (elapsed < app->frameTime)
-                rg_usleep(app->frameTime - elapsed);
-        }
+            /* If no skip: pace this single frame to frameTime. */
+            if (skipFrames == 0) {
+                int64_t now = rg_system_timer() - frame_start;
+                if (now < app->frameTime)
+                    rg_usleep(app->frameTime - now);
+            }
 #endif
+        } else {
+            skipFrames--;
+#ifdef RG_TARGET_SMARTBOX86
+            if (skipFrames == 0) {
+                /* End of render+skip group.  Pace the PAIR to (1+n)×frameTime so that
+                 * audio submission rate stays at the correct GBA rate (65536 Hz).
+                 * If PPU skip saved significant time the pair would finish early and
+                 * we sleep the remainder; if PPU costs nothing the pair was already
+                 * ≥ target and we skip the sleep. */
+                int n_total = 1 + ((user_frameskip > 0) ? user_frameskip : 1);
+                int64_t pair_target  = (int64_t)n_total * app->frameTime;
+                int64_t pair_elapsed = rg_system_timer() - frame_pair_start;
+                if (pair_elapsed < pair_target)
+                    rg_usleep(pair_target - pair_elapsed);
+            }
+#endif
+        }
     }
 }
