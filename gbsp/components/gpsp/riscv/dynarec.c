@@ -1,5 +1,13 @@
 /* RISC-V JIT backend for gpsp on ESP32-P4.
  *
+ * Phase F: Special instructions.
+ *   ADC/SBC/RSC: carry-in data-processing with inline carry propagation.
+ *   MUL/MLA: 32-bit multiply via RV32M mul.
+ *   MULL/MLAL: 64-bit multiply via RV32M mulh/mulhu + mul.
+ *   SWI: C helper executes the supervisor call; block terminates.
+ *   MRS/MSR: C helpers for CPSR/SPSR read/write with field-mask logic.
+ *   Thumb ADC, SBC (0x41 sub-cases) and Thumb SWI (0xDF) also covered.
+ *
  * Phase D: ARM branch instruction translation.
  *   B / BL (bits 27:25 = 101): signed 24-bit offset, optional LR save.
  *   BX Rm (bits 27:4 = 0x12FFF1): branch + optional Thumb switch.
@@ -162,6 +170,94 @@ void execute_ldm_stm(u32 opcode) {
     }
 
     if (W && !writeback_first) reg[rn] = endaddr;
+}
+
+/* ── SWI helpers ─────────────────────────────────────────────────────────── *
+ * Called from JIT blocks.  jit_collapse_flags() must be called first so that
+ * CPSR has the current N/Z/C/V before it is saved to SPSR_SVC.
+ * -------------------------------------------------------------------------- */
+
+void function_cc execute_swi_arm(u32 lr_val) {
+    /* lr_val = swi_instruction_pc + 4 (next instruction after SWI) */
+    jit_collapse_flags();
+    REG_MODE(MODE_SUPERVISOR)[6] = lr_val;
+    REG_SPSR(MODE_SUPERVISOR)   = reg[REG_CPSR];
+    reg[REG_PC]       = 0x00000008;
+    reg[REG_BUS_VALUE]= 0xE3A02004;
+    reg[REG_CPSR]     = (reg[REG_CPSR] & ~0x3Fu) | 0x13u | 0x80u;
+    set_cpu_mode(MODE_SUPERVISOR);
+}
+
+void function_cc execute_swi_thumb(u32 lr_val) {
+    /* lr_val = swi_instruction_pc + 2 (next Thumb instruction after SWI) */
+    jit_collapse_flags();
+    REG_MODE(MODE_SUPERVISOR)[6] = lr_val;
+    REG_SPSR(MODE_SUPERVISOR)   = reg[REG_CPSR];
+    reg[REG_PC]       = 0x00000008;
+    reg[REG_BUS_VALUE]= 0xE3A02004;
+    reg[REG_CPSR]     = (reg[REG_CPSR] & ~0x3Fu) | 0x13u | 0x80u;
+    set_cpu_mode(MODE_SUPERVISOR);
+}
+
+/* ── MRS helpers ─────────────────────────────────────────────────────────── */
+
+void function_cc execute_mrs_cpsr(u32 rd) {
+    jit_collapse_flags();
+    reg[rd] = reg[REG_CPSR];
+}
+
+void function_cc execute_mrs_spsr(u32 rd) {
+    jit_collapse_flags();
+    reg[rd] = REG_SPSR(reg[CPU_MODE]);
+}
+
+/* ── MSR helper ──────────────────────────────────────────────────────────── *
+ * Handles both register and immediate forms, and both CPSR and SPSR targets.
+ * psr_pfield index follows the cpu.cc formula:
+ *   ((opcode >> 16) & 1) | ((opcode >> 18) & 2)
+ * which maps bit-16 (control) to table index bit-0 and bit-19 (flags) to bit-1.
+ * -------------------------------------------------------------------------- */
+
+void function_cc execute_msr(u32 opcode) {
+    /* cpsr_masks / spsr_masks mirror the tables in cpu.cc */
+    static const u32 jit_cpsr_masks[4][2] = {
+        {0x00000000u, 0x00000000u},
+        {0x00000020u, 0x000000EFu},
+        {0xF0000000u, 0xF0000000u},
+        {0xF0000020u, 0xF00000EFu}
+    };
+    static const u32 jit_spsr_masks[4] = {
+        0x00000000u, 0x000000EFu, 0xF0000000u, 0xF00000EFu
+    };
+
+    u32  psr_pfield = ((opcode >> 16) & 1u) | ((opcode >> 18) & 2u);
+    bool R          = (opcode >> 22) & 1;  /* 1 = target SPSR */
+    bool I          = (opcode >> 25) & 1;  /* 1 = immediate source */
+
+    u32 val;
+    if (I) {
+        u32 rot  = ((opcode >> 8) & 0xFu) * 2u;
+        u32 imm8 =  opcode & 0xFFu;
+        val = rot ? ((imm8 >> rot) | (imm8 << (32u - rot))) : imm8;
+    } else {
+        val = reg[opcode & 0xFu];
+    }
+
+    if (!R) {
+        /* MSR CPSR */
+        u32 priv = PRIVMODE(reg[CPU_MODE]);
+        u32 mask = jit_cpsr_masks[psr_pfield][priv];
+        reg[REG_CPSR] = (val & mask) | (reg[REG_CPSR] & ~mask);
+        jit_extract_flags();
+        if (mask & 0xFFu)
+            set_cpu_mode(cpu_modes[reg[REG_CPSR] & 0xFu]);
+    } else {
+        /* MSR SPSR */
+        u32 mask  = jit_spsr_masks[psr_pfield];
+        u32 mode  = reg[CPU_MODE];
+        u32 saved = REG_SPSR(mode);
+        REG_SPSR(mode) = (val & mask) | (saved & ~mask);
+    }
 }
 
 /* ── GBA memory read at translation time ────────────────────────────────── */
@@ -560,6 +656,24 @@ static void emit_flags_sub(u8 **ptr) {
     emit_store_reg(ptr, RV_T3, REG_V_FLAG);
 }
 
+/* N/Z/V flags for ADC/SBC family (Rd = opA + opB [+ carry]).
+ * t0 = first addend (opA), t1 = second addend (opB), t2 = result.
+ * C flag was already written to reg[] before this call.  Clobbers t3, t4. */
+static void emit_flags_adc(u8 **ptr) {
+    emit32(ptr, rv_srli(RV_T3, RV_T2, 31));
+    emit_store_reg(ptr, RV_T3, REG_N_FLAG);
+    emit32(ptr, rv_sltiu(RV_T3, RV_T2, 1));
+    emit_store_reg(ptr, RV_T3, REG_Z_FLAG);
+    /* V: overflow when both operands same sign and result has different sign.
+     * = ~(opA ^ opB)[31] & (opA ^ result)[31] */
+    emit32(ptr, rv_xor(RV_T3, RV_T0, RV_T1));
+    emit32(ptr, rv_xori(RV_T3, RV_T3, -1));
+    emit32(ptr, rv_xor(RV_T4, RV_T0, RV_T2));
+    emit32(ptr, rv_and(RV_T3, RV_T3, RV_T4));
+    emit32(ptr, rv_srli(RV_T3, RV_T3, 31));
+    emit_store_reg(ptr, RV_T3, REG_V_FLAG);
+}
+
 /* ── Data-processing instruction translator ─────────────────────────────────
  * Translates one ARM data-processing instruction into RISC-V code at *ptr.
  * Returns false if the instruction can't be translated (caller rewinds ptr).
@@ -568,7 +682,7 @@ static void emit_flags_sub(u8 **ptr) {
  *   t0 = Rn (ARM first operand)
  *   t1 = op2 (ARM shifted second operand)
  *   t2 = result
- *   t3, t4 = flag temporaries
+ *   t3, t4 = flag temporaries; t5 used for ADC/SBC/RSC carry2
  * -------------------------------------------------------------------------- */
 
 static bool translate_data_proc(u8 **ptr, u32 opcode, u32 pc) {
@@ -578,8 +692,7 @@ static bool translate_data_proc(u8 **ptr, u32 opcode, u32 pc) {
     u32 rn   = (opcode >> 16) & 0xF;
     u32 rd   = (opcode >> 12) & 0xF;
 
-    /* ADC/SBC/RSC require carry-in; defer to Phase B.2 */
-    if (op == 0x5 || op == 0x6 || op == 0x7) return false;
+    /* ADC/SBC/RSC handled inline below */
 
     /* Condition check preamble */
     cond_patch_t cp = emit_cond_begin(ptr, cond);
@@ -632,7 +745,61 @@ static bool translate_data_proc(u8 **ptr, u32 opcode, u32 pc) {
         emit32(ptr, rv_add(RV_T2, RV_T0, RV_T1));
         if (S) emit_flags_add(ptr);
         break;
-    /* 0x5 ADC, 0x6 SBC, 0x7 RSC: already returned false above */
+    case 0x5:  /* ADC: Rd = Rn + op2 + C */
+        emit_load_reg(ptr, RV_T3, REG_C_FLAG);           /* t3 = C_in          */
+        emit32(ptr, rv_add(RV_T2, RV_T0, RV_T1));        /* t2 = Rn + op2      */
+        if (S) {
+            emit32(ptr, rv_sltu(RV_T4, RV_T2, RV_T0));   /* t4 = carry1        */
+            emit32(ptr, rv_add(RV_T2, RV_T2, RV_T3));    /* t2 += C_in         */
+            emit32(ptr, rv_sltu(RV_T5, RV_T2, RV_T3));   /* t5 = carry2        */
+            emit32(ptr, rv_or(RV_T4, RV_T4, RV_T5));
+            emit_store_reg(ptr, RV_T4, REG_C_FLAG);
+            emit_flags_adc(ptr);  /* N, Z, V: t0=Rn, t1=op2, t2=result */
+        } else {
+            emit32(ptr, rv_add(RV_T2, RV_T2, RV_T3));
+        }
+        break;
+    case 0x6:  /* SBC: Rd = Rn + ~op2 + C */
+        emit_load_reg(ptr, RV_T3, REG_C_FLAG);
+        emit32(ptr, rv_xori(RV_T1, RV_T1, -1));          /* t1 = ~op2          */
+        emit32(ptr, rv_add(RV_T2, RV_T0, RV_T1));
+        if (S) {
+            emit32(ptr, rv_sltu(RV_T4, RV_T2, RV_T0));
+            emit32(ptr, rv_add(RV_T2, RV_T2, RV_T3));
+            emit32(ptr, rv_sltu(RV_T5, RV_T2, RV_T3));
+            emit32(ptr, rv_or(RV_T4, RV_T4, RV_T5));
+            emit_store_reg(ptr, RV_T4, REG_C_FLAG);
+            emit_flags_adc(ptr);  /* t0=Rn, t1=~op2, t2=result ✓ */
+        } else {
+            emit32(ptr, rv_add(RV_T2, RV_T2, RV_T3));
+        }
+        break;
+    case 0x7:  /* RSC: Rd = op2 + ~Rn + C */
+        emit_load_reg(ptr, RV_T3, REG_C_FLAG);
+        emit32(ptr, rv_xori(RV_T0, RV_T0, -1));          /* t0 = ~Rn           */
+        emit32(ptr, rv_add(RV_T2, RV_T1, RV_T0));        /* t2 = op2 + ~Rn     */
+        if (S) {
+            emit32(ptr, rv_sltu(RV_T4, RV_T2, RV_T1));   /* carry1: sum <u op2 */
+            emit32(ptr, rv_add(RV_T2, RV_T2, RV_T3));
+            emit32(ptr, rv_sltu(RV_T5, RV_T2, RV_T3));
+            emit32(ptr, rv_or(RV_T4, RV_T4, RV_T5));
+            emit_store_reg(ptr, RV_T4, REG_C_FLAG);
+            /* N, Z flags */
+            emit32(ptr, rv_srli(RV_T3, RV_T2, 31));
+            emit_store_reg(ptr, RV_T3, REG_N_FLAG);
+            emit32(ptr, rv_sltiu(RV_T3, RV_T2, 1));
+            emit_store_reg(ptr, RV_T3, REG_Z_FLAG);
+            /* V: ~(t0^t1)[31] & (t1^t2)[31]  (t1=op2 is the leading operand) */
+            emit32(ptr, rv_xor(RV_T3, RV_T0, RV_T1));
+            emit32(ptr, rv_xori(RV_T3, RV_T3, -1));
+            emit32(ptr, rv_xor(RV_T4, RV_T1, RV_T2));
+            emit32(ptr, rv_and(RV_T3, RV_T3, RV_T4));
+            emit32(ptr, rv_srli(RV_T3, RV_T3, 31));
+            emit_store_reg(ptr, RV_T3, REG_V_FLAG);
+        } else {
+            emit32(ptr, rv_add(RV_T2, RV_T2, RV_T3));
+        }
+        break;
     case 0x8:  /* TST: flags from Rn & op2, no Rd */
         emit32(ptr, rv_and(RV_T2, RV_T0, RV_T1));
         emit_flags_nz(ptr, RV_T2);
@@ -703,6 +870,156 @@ static bool is_halfword_ldrstr(u32 opcode) {
 /* LDM/STM: bits 27:25 = 100 */
 static bool is_ldm_stm(u32 opcode) {
     return ((opcode >> 25) & 7) == 4;
+}
+
+/* MUL/MULS/MLA/MLAS: bits 27:23 = 00000, bits 7:4 = 1001 (bits 6:5 = 00) */
+static bool is_mul(u32 opcode) {
+    return ((opcode >> 23) & 0x1F) == 0
+        && (opcode & 0xF0) == 0x90
+        && !(opcode & 0x60);
+}
+
+/* UMULL/UMLAL/SMULL/SMLAL: bits 27:23 = 00001, bits 7:4 = 1001 */
+static bool is_mull(u32 opcode) {
+    return ((opcode >> 23) & 0x1F) == 1
+        && (opcode & 0xF0) == 0x90
+        && !(opcode & 0x60);
+}
+
+/* MRS/MSR: PSR transfer instructions excluded from is_data_proc */
+static bool is_psr(u32 opcode) {
+    u32 key = (opcode >> 20) & 0xFF;
+    if (key == 0x10 && !(opcode & 0x90)) return true;  /* MRS CPSR        */
+    if (key == 0x14 && !(opcode & 0x90)) return true;  /* MRS SPSR        */
+    /* MSR CPSR/Rm: bit 4 = 0 distinguishes from BX (bit 4 = 1) */
+    if (key == 0x12 && !(opcode & 0x10) && !(opcode & 0x60)) return true;
+    if (key == 0x16 && !(opcode & 0x60)) return true;  /* MSR SPSR/Rm     */
+    if (key == 0x32) return true;                       /* MSR CPSR, #imm  */
+    if (key == 0x36) return true;                       /* MSR SPSR, #imm  */
+    return false;
+}
+
+/* SWI: bits 27:24 = 1111 */
+static bool is_swi(u32 opcode) {
+    return ((opcode >> 24) & 0xF) == 0xF;
+}
+
+/* ── MUL / MLA translator ────────────────────────────────────────────────── */
+
+static bool translate_mul(u8 **ptr, u32 opcode, u32 pc) {
+    (void)pc;
+    u32  cond = opcode >> 28;
+    bool A    = (opcode >> 21) & 1;  /* accumulate (MLA) */
+    bool S    = (opcode >> 20) & 1;  /* set flags        */
+    u32  rd   = (opcode >> 16) & 0xF;
+    u32  rn   = (opcode >> 12) & 0xF;
+    u32  rs   = (opcode >>  8) & 0xF;
+    u32  rm   =  opcode        & 0xF;
+
+    /* Architecturally UNPREDICTABLE cases on ARM7TDMI */
+    if (rd == REG_PC || rs == REG_PC || rm == REG_PC) return false;
+    if (A && rn == REG_PC) return false;
+    if (rd == rm) return false;
+
+    cond_patch_t cp = emit_cond_begin(ptr, cond);
+
+    emit_load_reg(ptr, RV_T0, rm);
+    emit_load_reg(ptr, RV_T1, rs);
+    emit32(ptr, rv_mul(RV_T2, RV_T0, RV_T1));   /* t2 = rm * rs (low 32) */
+    if (A) {
+        emit_load_reg(ptr, RV_T0, rn);
+        emit32(ptr, rv_add(RV_T2, RV_T2, RV_T0));
+    }
+    if (S) {
+        /* MUL/MLA: only N and Z flags defined; C and V UNPREDICTABLE */
+        emit32(ptr, rv_srli(RV_T3, RV_T2, 31));
+        emit_store_reg(ptr, RV_T3, REG_N_FLAG);
+        emit32(ptr, rv_sltiu(RV_T3, RV_T2, 1));
+        emit_store_reg(ptr, RV_T3, REG_Z_FLAG);
+    }
+    emit_store_reg(ptr, RV_T2, rd);
+    emit_cond_end(ptr, cp);
+    return true;
+}
+
+/* ── UMULL/UMLAL/SMULL/SMLAL translator ─────────────────────────────────── */
+
+static bool translate_mull(u8 **ptr, u32 opcode, u32 pc) {
+    (void)pc;
+    u32  cond     = opcode >> 28;
+    bool sign_mul = (opcode >> 22) & 1;  /* 1 = signed (SMULL/SMLAL) */
+    bool accum    = (opcode >> 21) & 1;  /* 1 = accumulate            */
+    bool set_f    = (opcode >> 20) & 1;  /* set flags                 */
+    u32  rdhi     = (opcode >> 16) & 0xF;
+    u32  rdlo     = (opcode >> 12) & 0xF;
+    u32  rs       = (opcode >>  8) & 0xF;
+    u32  rm       =  opcode        & 0xF;
+
+    if (rdhi == REG_PC || rdlo == REG_PC || rs == REG_PC || rm == REG_PC)
+        return false;
+    if (rdhi == rdlo || rdhi == rm || rdlo == rm) return false; /* UNPREDICTABLE */
+
+    cond_patch_t cp = emit_cond_begin(ptr, cond);
+
+    emit_load_reg(ptr, RV_T0, rm);
+    emit_load_reg(ptr, RV_T1, rs);
+
+    if (sign_mul)
+        emit32(ptr, rv_mulh(RV_T3, RV_T0, RV_T1));   /* t3 = high 32 (signed) */
+    else
+        emit32(ptr, rv_mulhu(RV_T3, RV_T0, RV_T1));  /* t3 = high 32 (unsigned) */
+    emit32(ptr, rv_mul(RV_T2, RV_T0, RV_T1));         /* t2 = low 32 */
+
+    if (accum) {
+        /* rdhi:rdlo += t3:t2  (64-bit addition with carry propagation) */
+        emit_load_reg(ptr, RV_T4, rdlo);
+        emit_load_reg(ptr, RV_T5, rdhi);
+        emit32(ptr, rv_add(RV_T2, RV_T2, RV_T4));    /* new lo */
+        emit32(ptr, rv_sltu(RV_T4, RV_T2, RV_T4));   /* carry  */
+        emit32(ptr, rv_add(RV_T3, RV_T3, RV_T5));    /* new hi */
+        emit32(ptr, rv_add(RV_T3, RV_T3, RV_T4));    /* + carry */
+    }
+
+    if (set_f) {
+        /* N from hi[31], Z if both hi and lo are zero */
+        emit32(ptr, rv_srli(RV_T4, RV_T3, 31));
+        emit_store_reg(ptr, RV_T4, REG_N_FLAG);
+        emit32(ptr, rv_or(RV_T4, RV_T2, RV_T3));
+        emit32(ptr, rv_sltiu(RV_T4, RV_T4, 1));
+        emit_store_reg(ptr, RV_T4, REG_Z_FLAG);
+    }
+
+    emit_store_reg(ptr, RV_T2, rdlo);
+    emit_store_reg(ptr, RV_T3, rdhi);
+    emit_cond_end(ptr, cp);
+    return true;
+}
+
+/* ── MRS / MSR translator ────────────────────────────────────────────────── */
+
+static bool translate_psr(u8 **ptr, u32 opcode, u32 pc) {
+    (void)pc;
+    u32 cond = opcode >> 28;
+    u32 key  = (opcode >> 20) & 0xFF;
+
+    if (key == 0x10 || key == 0x14) {
+        /* MRS Rd, CPSR/SPSR */
+        u32  rd   = (opcode >> 12) & 0xF;
+        bool spsr = (key == 0x14);
+        if (rd == REG_PC) return false;
+        cond_patch_t cp = emit_cond_begin(ptr, cond);
+        emit_li32(ptr, RV_A0, rd);
+        emit_call32(ptr, spsr ? (u32)(uintptr_t)execute_mrs_spsr
+                              : (u32)(uintptr_t)execute_mrs_cpsr);
+        emit_cond_end(ptr, cp);
+    } else {
+        /* MSR CPSR/SPSR, Rm or #imm — pass full opcode to C helper */
+        cond_patch_t cp = emit_cond_begin(ptr, cond);
+        emit_li32(ptr, RV_A0, opcode);
+        emit_call32(ptr, (u32)(uintptr_t)execute_msr);
+        emit_cond_end(ptr, cp);
+    }
+    return true;
 }
 
 /* ── Single-register load/store translator ───────────────────────────────── *
@@ -1175,6 +1492,30 @@ bool translate_block_arm(u32 pc, bool ram_region) {
             cur_pc += 4;
             break;  /* always end block after LDM/STM */
 
+        } else if (is_mul(opcode)) {
+            if (!translate_mul(cache, opcode, cur_pc)) { *cache = before; break; }
+            block_cycles += per_cycle;
+            cur_pc += 4;
+
+        } else if (is_mull(opcode)) {
+            if (!translate_mull(cache, opcode, cur_pc)) { *cache = before; break; }
+            block_cycles += per_cycle;
+            cur_pc += 4;
+
+        } else if (is_psr(opcode)) {
+            if (!translate_psr(cache, opcode, cur_pc)) { *cache = before; break; }
+            block_cycles += per_cycle;
+            cur_pc += 4;
+
+        } else if (is_swi(opcode)) {
+            block_cycles += per_cycle;
+            cur_pc += 4;
+            /* lr_val = instruction_pc + 4 = cur_pc after increment */
+            emit_li32(cache, RV_A0, cur_pc);
+            emit_call32(cache, (u32)(uintptr_t)execute_swi_arm);
+            pc_written = true;
+            break;
+
         } else {
             break;  /* unknown → interpreter handles it */
         }
@@ -1419,8 +1760,42 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             block_cycles += per_cycle; cur_pc += 2;
             break;
         }
-        case 0x41: /* ASR-reg/ADC/SBC/ROR: carry-in or reg shift → defer */
-            done = true; break;
+        case 0x41: {
+            int sub = (opcode >> 6) & 3;
+            int rs  = (opcode >> 3) & 7;
+            int rd  = opcode & 7;
+            if (sub == 1) {   /* ADC rd, rs */
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit_load_reg(cache, RV_T3, REG_C_FLAG);
+                emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+                emit32(cache, rv_sltu(RV_T4, RV_T2, RV_T0));
+                emit32(cache, rv_add(RV_T2, RV_T2, RV_T3));
+                emit32(cache, rv_sltu(RV_T5, RV_T2, RV_T3));
+                emit32(cache, rv_or(RV_T4, RV_T4, RV_T5));
+                emit_store_reg(cache, RV_T4, REG_C_FLAG);
+                emit_flags_adc(cache);   /* t0=rd, t1=rs, t2=result */
+                emit_store_reg(cache, RV_T2, rd);
+                block_cycles += per_cycle; cur_pc += 2;
+            } else if (sub == 2) {   /* SBC rd, rs */
+                emit_load_reg(cache, RV_T0, rd);
+                emit_load_reg(cache, RV_T1, rs);
+                emit_load_reg(cache, RV_T3, REG_C_FLAG);
+                emit32(cache, rv_xori(RV_T1, RV_T1, -1));   /* ~rs */
+                emit32(cache, rv_add(RV_T2, RV_T0, RV_T1));
+                emit32(cache, rv_sltu(RV_T4, RV_T2, RV_T0));
+                emit32(cache, rv_add(RV_T2, RV_T2, RV_T3));
+                emit32(cache, rv_sltu(RV_T5, RV_T2, RV_T3));
+                emit32(cache, rv_or(RV_T4, RV_T4, RV_T5));
+                emit_store_reg(cache, RV_T4, REG_C_FLAG);
+                emit_flags_adc(cache);   /* t0=rd, t1=~rs, t2=result ✓ */
+                emit_store_reg(cache, RV_T2, rd);
+                block_cycles += per_cycle; cur_pc += 2;
+            } else {
+                done = true;   /* ASR-reg (sub=0), ROR-reg (sub=3): defer */
+            }
+            break;
+        }
         case 0x42: { /* TST/NEG/CMP/CMN */
             int sub = (opcode >> 6) & 3;
             int rs  = (opcode >> 3) & 7;
@@ -1888,7 +2263,16 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             break;
         }
 
-        default: /* Unknown / SWI / BL Part 2 standalone: bail to interpreter */
+        case 0xDF: { /* SWI #imm8 */
+            block_cycles += per_cycle; cur_pc += 2;
+            /* lr_val = swi_pc + 2 = cur_pc after the increment */
+            emit_li32(cache, RV_A0, cur_pc);
+            emit_call32(cache, (u32)(uintptr_t)execute_swi_thumb);
+            pc_written = true; done = true;
+            break;
+        }
+
+        default: /* Unknown / BL Part 2 standalone: bail to interpreter */
             done = true;
             break;
         }
