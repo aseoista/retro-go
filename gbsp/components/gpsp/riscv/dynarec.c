@@ -1,5 +1,29 @@
 /* RISC-V JIT backend for gpsp on ESP32-P4.
  *
+ * Phase H conclusion: BIOS JIT reverted — interpreter wins on ESP32-P4.
+ *   BIOS JIT (extending is_rom_region to 0x0000–0x3FFF) was tried and
+ *   hardware-measured at 23 FPS vs Phase G's 37 FPS.  Root cause: BIOS JIT
+ *   blocks execute from PSRAM (I-cache, slow), but the interpreter runs the
+ *   BIOS from IRAM (fast).  BIOS runs on every SWI/IRQ so the overhead
+ *   accumulates every frame.  BIOS is excluded from is_rom_region.
+ *
+ *   Retained Phase H improvements:
+ *   - HASH_IDX includes region byte (pc>>24) to prevent BIOS/ROM slot aliases.
+ *   - execute_exception_return(): handles data-proc exception returns (MOVS PC,
+ *     lr; SUBS PC, lr, #4) — collapses flags, restores CPSR from SPSR, switches
+ *     mode, extracts new flags.  translate_data_proc S+rd==PC case updated.
+ *   - IRQ dispatch: check_and_raise_interrupts() is called in JIT context so
+ *     PC/mode/LR_IRQ are set before falling back to interpreter at 0x0018.
+ *   - Top-of-loop halt guard always passes -1 to update_gba (never positive).
+ *
+ * Phase G: Inline memory access optimisation.
+ *   Fast IRAM_ATTR helpers (mem_load/store_*_fast) check IWRAM (0x03) and
+ *   EWRAM (0x02) inline before falling back to read/write_memory*.  JIT call
+ *   sites use these helpers instead of the generic execute_load/store_* ones.
+ *   Constant pool folding: ARM/Thumb LDR Rd,[PC,#imm] targeting ROM/BIOS is
+ *   resolved at translation time — the value is emitted as a li32 constant,
+ *   eliminating both the address computation and the C function call.
+ *
  * Phase F: Special instructions.
  *   ADC/SBC/RSC: carry-in data-processing with inline carry propagation.
  *   MUL/MLA: 32-bit multiply via RV32M mul.
@@ -35,6 +59,10 @@
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
 #include "esp_cache.h"
+#include "esp_attr.h"
+#define JIT_MEM_ATTR IRAM_ATTR
+#else
+#define JIT_MEM_ATTR
 #endif
 
 /* ── CPU state ─────────────────────────────────────────────────────────────
@@ -121,6 +149,78 @@ void function_cc execute_store_aligned_u32(u32 address, u32 source) {
     write_memory32(address & ~3u, source);
 }
 
+/* ── Phase G: fast memory access helpers ─────────────────────────────────────
+ * IWRAM (0x03) and EWRAM (0x02) are handled inline with direct array access,
+ * bypassing the full read/write_memory* region switch.  JIT_MEM_ATTR places
+ * these small hot functions in on-chip SRAM (IRAM) on ESP32-P4 so they never
+ * incur an I-cache miss.
+ *
+ * Store fast paths bypass the SMC sentinel check; this matches the pre-existing
+ * JIT behaviour (execute_store_u32 already discards write_memory32's return).
+ * -------------------------------------------------------------------------- */
+
+static JIT_MEM_ATTR u32 function_cc mem_load_u32_fast(u32 addr) {
+    u32 r = addr >> 24;
+    if (r == 3) return *(const u32 *)(iwram + (((addr & 0x7FFFu) | 0x8000u) & ~3u));
+    if (r == 2) return *(const u32 *)(ewram + ((addr & 0x3FFFFu) & ~3u));
+    return read_memory32(addr);
+}
+
+static JIT_MEM_ATTR u32 function_cc mem_load_u16_fast(u32 addr) {
+    u32 r = addr >> 24;
+    if (r == 3) return *(const u16 *)(iwram + (((addr & 0x7FFFu) | 0x8000u) & ~1u));
+    if (r == 2) return *(const u16 *)(ewram + ((addr & 0x3FFFFu) & ~1u));
+    return read_memory16(addr);
+}
+
+static JIT_MEM_ATTR u32 function_cc mem_load_u8_fast(u32 addr) {
+    u32 r = addr >> 24;
+    if (r == 3) return iwram[(addr & 0x7FFFu) | 0x8000u];
+    if (r == 2) return ewram[addr & 0x3FFFFu];
+    return read_memory8(addr);
+}
+
+static JIT_MEM_ATTR u32 function_cc mem_load_s8_fast(u32 addr) {
+    u32 r = addr >> 24;
+    if (r == 3) return (u32)(int32_t)(int8_t)iwram[(addr & 0x7FFFu) | 0x8000u];
+    if (r == 2) return (u32)(int32_t)(int8_t)ewram[addr & 0x3FFFFu];
+    return read_memory8s(addr);
+}
+
+static JIT_MEM_ATTR u32 function_cc mem_load_s16_fast(u32 addr) {
+    u32 r = addr >> 24;
+    if (r == 3) {
+        const u32 off = ((addr & 0x7FFFu) | 0x8000u) & ~1u;
+        return (u32)(int32_t)(int16_t)(*(const u16 *)(iwram + off));
+    }
+    if (r == 2) {
+        const u32 off = (addr & 0x3FFFFu) & ~1u;
+        return (u32)(int32_t)(int16_t)(*(const u16 *)(ewram + off));
+    }
+    return read_memory16s(addr);
+}
+
+static JIT_MEM_ATTR void function_cc mem_store_u32_fast(u32 addr, u32 val) {
+    u32 r = addr >> 24;
+    if (r == 3) { *(u32 *)(iwram + (((addr & 0x7FFFu) | 0x8000u) & ~3u)) = val; return; }
+    if (r == 2) { *(u32 *)(ewram + ((addr & 0x3FFFFu) & ~3u)) = val; return; }
+    write_memory32(addr, val);
+}
+
+static JIT_MEM_ATTR void function_cc mem_store_u16_fast(u32 addr, u32 val) {
+    u32 r = addr >> 24;
+    if (r == 3) { *(u16 *)(iwram + (((addr & 0x7FFFu) | 0x8000u) & ~1u)) = (u16)val; return; }
+    if (r == 2) { *(u16 *)(ewram + ((addr & 0x3FFFFu) & ~1u)) = (u16)val; return; }
+    write_memory16(addr, (u16)val);
+}
+
+static JIT_MEM_ATTR void function_cc mem_store_u8_fast(u32 addr, u32 val) {
+    u32 r = addr >> 24;
+    if (r == 3) { iwram[(addr & 0x7FFFu) | 0x8000u] = (u8)val; return; }
+    if (r == 2) { ewram[addr & 0x3FFFFu] = (u8)val; return; }
+    write_memory8(addr, (u8)val);
+}
+
 /* ── LDM/STM C helper ───────────────────────────────────────────────────────
  * Called from JIT blocks.  Before calling, emit code to set reg[REG_PC] to
  * instruction_pc + 4 so STM with PC stores the correct value (instruction+8).
@@ -197,6 +297,21 @@ void function_cc execute_swi_thumb(u32 lr_val) {
     reg[REG_BUS_VALUE]= 0xE3A02004;
     reg[REG_CPSR]     = (reg[REG_CPSR] & ~0x3Fu) | 0x13u | 0x80u;
     set_cpu_mode(MODE_SUPERVISOR);
+}
+
+/* ── Exception-return helper ─────────────────────────────────────────────── *
+ * Called from JIT blocks for data-proc instructions with S=1 and Rd=PC
+ * (e.g. MOVS PC, lr  or  SUBS PC, lr, #4).
+ * Restores CPSR from the current mode's SPSR, switches mode, then extracts
+ * the new flags so the next JIT block sees them in the individual flag regs.
+ * -------------------------------------------------------------------------- */
+void function_cc execute_exception_return(u32 new_pc) {
+    jit_collapse_flags();
+    u32 mode = reg[CPU_MODE];
+    reg[REG_CPSR] = REG_SPSR(mode);
+    set_cpu_mode(reg[REG_CPSR] & 0x1Fu);
+    reg[REG_PC] = new_pc & ~1u;
+    jit_extract_flags();
 }
 
 /* ── MRS helpers ─────────────────────────────────────────────────────────── */
@@ -280,7 +395,25 @@ static u16 jit_read_thumb_opcode(u32 pc) {
 
 static bool is_rom_region(u32 pc) {
     u32 r = pc >> 24;
+    /* BIOS (0x00) excluded: it runs faster in the interpreter (IRAM) than
+     * in the JIT (PSRAM).  Phase H showed 23 FPS vs Phase G's 37 FPS. */
     return r >= 0x08 && r <= 0x0D;
+}
+
+/* Read one word from GBA memory at JIT compile time via the page table.
+ * Used for constant pool folding: the value is baked into the JIT stream. */
+static u32 jit_read_u32(u32 addr) {
+    u32 region = (addr >> 15) & 0x1FFF;
+    u8 *blk = memory_map_read[region];
+    if (!blk) return 0;
+    return readaddress32(blk, addr & 0x7FFF);
+}
+
+/* True for BIOS/ROM regions whose contents never change from the JIT's
+ * perspective: GBA code cannot write to these regions. */
+static bool is_constant_region(u32 addr) {
+    u32 r = addr >> 24;
+    return r == 0x00 || (r >= 0x08 && r <= 0x0C);
 }
 
 /* ── Block hash registry ────────────────────────────────────────────────────
@@ -289,7 +422,10 @@ static bool is_rom_region(u32 pc) {
  * Execution starts at tag+4.
  * -------------------------------------------------------------------------- */
 #define JIT_TAG_SIZE  4
-#define HASH_IDX(pc)  (((pc) >> 2) & (ROM_BRANCH_HASH_SIZE - 1))
+/* XOR the region byte (bits 27:24) into the index so BIOS (0x00xxxxxx) and
+ * ROM (0x08-0x0Dxxxxxx) addresses map to distinct slots and don't evict each
+ * other's blocks. ROM-only and BIOS-only collisions are unaffected. */
+#define HASH_IDX(pc)  ((((pc) >> 2) ^ ((pc) >> 24)) & (ROM_BRANCH_HASH_SIZE - 1))
 
 /* ── Condition-check emission ───────────────────────────────────────────────
  * Emits a comparison + placeholder branch that will skip the instruction body
@@ -841,8 +977,14 @@ static bool translate_data_proc(u8 **ptr, u32 opcode, u32 pc) {
 
     if (write_rd) {
         if (rd == REG_PC) {
-            /* Branch via data proc: write computed PC to reg[]; block ends. */
-            emit32(ptr, rv_sw(RV_T2, JIT_REG_BASE, REG_PC * 4));
+            if (S) {
+                /* Exception return (MOVS/SUBS PC, lr, #N): restore CPSR from SPSR */
+                emit32(ptr, rv_addi(RV_A0, RV_T2, 0));
+                emit_call32(ptr, (u32)(uintptr_t)execute_exception_return);
+            } else {
+                /* Plain branch via data proc: write PC, block ends */
+                emit32(ptr, rv_sw(RV_T2, JIT_REG_BASE, REG_PC * 4));
+            }
         } else {
             emit_store_reg(ptr, RV_T2, rd);
         }
@@ -1053,6 +1195,37 @@ static bool translate_single_ldrstr(u8 **ptr, u32 opcode, u32 pc,
     /* Writeback to PC is unusual; let interpreter handle */
     if (((P ? W : 1u)) && rn == REG_PC) return false;
 
+    /* ── Constant pool fold ─────────────────────────────────────────────────
+     * ARM LDR Rd, [PC, #imm] targeting ROM or BIOS is extremely common.
+     * The value at (PC+8 ± imm) is fixed — read it at translation time and
+     * emit a single li32/sw pair, skipping the C helper call entirely. */
+    if (!I && P && !W && L && rn == REG_PC) {
+        u32 imm12    = opcode & 0xFFF;
+        u32 eff_addr = (pc + 8u) + (U ? imm12 : (u32)(-(int32_t)imm12));
+        if (!B && is_constant_region(eff_addr)) {
+            u32 val = jit_read_u32(eff_addr & ~3u);
+            cond_patch_t cp = emit_cond_begin(ptr, cond);
+            emit_li32(ptr, RV_T0, val);
+            if (rd == REG_PC) {
+                emit_store_reg(ptr, RV_T0, REG_PC);
+                *pc_written_out = true;
+            } else {
+                emit_store_reg(ptr, RV_T0, rd);
+            }
+            emit_cond_end(ptr, cp);
+            return true;
+        }
+        if (B && is_constant_region(eff_addr)) {
+            u32 val = jit_read_u32(eff_addr & ~3u);
+            u8 byte = (u8)(val >> ((eff_addr & 3u) * 8u));
+            cond_patch_t cp = emit_cond_begin(ptr, cond);
+            emit_li32(ptr, RV_T0, (u32)byte);
+            emit_store_reg(ptr, RV_T0, rd);
+            emit_cond_end(ptr, cp);
+            return true;
+        }
+    }
+
     cond_patch_t cp = emit_cond_begin(ptr, cond);
 
     /* --- Load base into a0 --- */
@@ -1127,8 +1300,8 @@ static bool translate_single_ldrstr(u8 **ptr, u32 opcode, u32 pc,
 
     /* --- Memory helper call --- */
     if (L) {
-        uint32_t fn = B ? (uint32_t)(uintptr_t)execute_load_u8
-                        : (uint32_t)(uintptr_t)execute_load_u32;
+        uint32_t fn = B ? (uint32_t)(uintptr_t)mem_load_u8_fast
+                        : (uint32_t)(uintptr_t)mem_load_u32_fast;
         emit_call32(ptr, fn);
         if (rd == REG_PC) {
             emit_store_reg(ptr, RV_A0, REG_PC);
@@ -1142,8 +1315,8 @@ static bool translate_single_ldrstr(u8 **ptr, u32 opcode, u32 pc,
             emit_li32(ptr, RV_A1, pc + 12);
         else
             emit_load_reg(ptr, RV_A1, rd);
-        uint32_t fn = B ? (uint32_t)(uintptr_t)execute_store_u8
-                        : (uint32_t)(uintptr_t)execute_store_u32;
+        uint32_t fn = B ? (uint32_t)(uintptr_t)mem_store_u8_fast
+                        : (uint32_t)(uintptr_t)mem_store_u32_fast;
         emit_call32(ptr, fn);
     }
 
@@ -1221,9 +1394,9 @@ static bool translate_halfword_ldrstr(u8 **ptr, u32 opcode, u32 pc,
     if (L) {
         uint32_t fn;
         switch (type) {
-        case 1: fn = (uint32_t)(uintptr_t)execute_load_u16; break;
-        case 2: fn = (uint32_t)(uintptr_t)execute_load_s8;  break;
-        case 3: fn = (uint32_t)(uintptr_t)execute_load_s16; break;
+        case 1: fn = (uint32_t)(uintptr_t)mem_load_u16_fast; break;
+        case 2: fn = (uint32_t)(uintptr_t)mem_load_s8_fast;  break;
+        case 3: fn = (uint32_t)(uintptr_t)mem_load_s16_fast; break;
         default: emit_cond_end(ptr, cp); return false;
         }
         emit_call32(ptr, fn);
@@ -1239,7 +1412,7 @@ static bool translate_halfword_ldrstr(u8 **ptr, u32 opcode, u32 pc,
             emit_li32(ptr, RV_A1, pc + 12);
         else
             emit_load_reg(ptr, RV_A1, rd);
-        emit_call32(ptr, (uint32_t)(uintptr_t)execute_store_u16);
+        emit_call32(ptr, (uint32_t)(uintptr_t)mem_store_u16_fast);
     }
 
     emit_cond_end(ptr, cp);
@@ -1929,10 +2102,16 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
         case 0x48 ... 0x4F: { /* LDR rd, [pc + imm*4] */
             u32 rd   = (opcode >> 8) & 7;
             u32 imm  = opcode & 0xFF;
-            u32 addr = (cur_pc & ~2u) + 4u + imm * 4u;
-            emit_li32(cache, RV_A0, addr);
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
-            emit_store_reg(cache, RV_A0, rd);
+            u32 addr = (cur_pc & ~2u) + 4u + imm * 4u; /* always word-aligned */
+            if (is_constant_region(addr)) {
+                /* Constant pool fold: value is in ROM, read at JIT time */
+                emit_li32(cache, RV_T0, jit_read_u32(addr));
+                emit_store_reg(cache, RV_T0, rd);
+            } else {
+                emit_li32(cache, RV_A0, addr);
+                emit_call32(cache, (u32)(uintptr_t)mem_load_u32_fast);
+                emit_store_reg(cache, RV_A0, rd);
+            }
             block_cycles += per_cycle; cur_pc += 2;
             break;
         }
@@ -1946,7 +2125,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
             emit_load_reg(cache, RV_A1, rd);
-            emit_call32(cache, (u32)(uintptr_t)execute_store_u32);
+            emit_call32(cache, (u32)(uintptr_t)mem_store_u32_fast);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
         case 0x52:
@@ -1956,7 +2135,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
             emit_load_reg(cache, RV_A1, rd);
-            emit_call32(cache, (u32)(uintptr_t)execute_store_u16);
+            emit_call32(cache, (u32)(uintptr_t)mem_store_u16_fast);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
         case 0x54:
@@ -1966,7 +2145,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
             emit_load_reg(cache, RV_A1, rd);
-            emit_call32(cache, (u32)(uintptr_t)execute_store_u8);
+            emit_call32(cache, (u32)(uintptr_t)mem_store_u8_fast);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
         case 0x56:
@@ -1975,7 +2154,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_A0, rb);
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
-            emit_call32(cache, (u32)(uintptr_t)execute_load_s8);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_s8_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -1985,7 +2164,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_A0, rb);
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_u32_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -1995,7 +2174,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_A0, rb);
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u16);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_u16_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -2005,7 +2184,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_A0, rb);
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u8);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_u8_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -2015,7 +2194,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             emit_load_reg(cache, RV_A0, rb);
             emit_load_reg(cache, RV_T0, ro);
             emit32(cache, rv_add(RV_A0, RV_A0, RV_T0));
-            emit_call32(cache, (u32)(uintptr_t)execute_load_s16);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_s16_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -2037,13 +2216,13 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
             THUMB_ADDR_IMM(rb, imm * 4u);
             emit_load_reg(cache, RV_A1, rd);
-            emit_call32(cache, (u32)(uintptr_t)execute_store_u32);
+            emit_call32(cache, (u32)(uintptr_t)mem_store_u32_fast);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
         case 0x68 ... 0x6F: { /* LDR [rb+imm*4] */
             u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
             THUMB_ADDR_IMM(rb, imm * 4u);
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_u32_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -2051,13 +2230,13 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
             THUMB_ADDR_IMM(rb, imm);
             emit_load_reg(cache, RV_A1, rd);
-            emit_call32(cache, (u32)(uintptr_t)execute_store_u8);
+            emit_call32(cache, (u32)(uintptr_t)mem_store_u8_fast);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
         case 0x78 ... 0x7F: { /* LDRB [rb+imm] */
             u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
             THUMB_ADDR_IMM(rb, imm);
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u8);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_u8_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -2065,13 +2244,13 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
             THUMB_ADDR_IMM(rb, imm * 2u);
             emit_load_reg(cache, RV_A1, rd);
-            emit_call32(cache, (u32)(uintptr_t)execute_store_u16);
+            emit_call32(cache, (u32)(uintptr_t)mem_store_u16_fast);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
         case 0x88 ... 0x8F: { /* LDRH [rb+imm*2] */
             u32 imm = (opcode >> 6) & 0x1F, rb = (opcode >> 3) & 7, rd = opcode & 7;
             THUMB_ADDR_IMM(rb, imm * 2u);
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u16);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_u16_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -2086,7 +2265,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             if (off <= 2047u) emit32(cache, rv_addi(RV_A0, RV_A0, (int)off));
             else { emit_li32(cache, RV_T0, off); emit32(cache, rv_add(RV_A0, RV_A0, RV_T0)); }
             emit_load_reg(cache, RV_A1, rd);
-            emit_call32(cache, (u32)(uintptr_t)execute_store_u32);
+            emit_call32(cache, (u32)(uintptr_t)mem_store_u32_fast);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
         case 0x98 ... 0x9F: { /* LDR rd, [sp+imm*4] */
@@ -2095,7 +2274,7 @@ bool translate_block_thumb(u32 pc, bool ram_region) {
             u32 off = imm * 4u;
             if (off <= 2047u) emit32(cache, rv_addi(RV_A0, RV_A0, (int)off));
             else { emit_li32(cache, RV_T0, off); emit32(cache, rv_add(RV_A0, RV_A0, RV_T0)); }
-            emit_call32(cache, (u32)(uintptr_t)execute_load_u32);
+            emit_call32(cache, (u32)(uintptr_t)mem_load_u32_fast);
             emit_store_reg(cache, RV_A0, rd);
             block_cycles += per_cycle; cur_pc += 2; break;
         }
@@ -2350,8 +2529,12 @@ u32 execute_arm_translate(u32 cycles) {
 
     while (1) {
         if (reg[CPU_HALT_STATE] != CPU_ACTIVE) {
+            /* Reachable when a block sets halt/stop and cycles haven't expired.
+             * Use -1 so update_gba sees completed_cycles = execute_cycles+1,
+             * advancing exactly one quantum — never pass a positive value here
+             * because completed_cycles would underflow (unsigned subtraction). */
             jit_collapse_flags();
-            u32 ret = update_gba(cycles_remaining);
+            u32 ret = update_gba(-1);
             if (completed_frame(ret))
                 return 0;
             cycles_remaining = (s32)cycles_to_run(ret);
@@ -2375,12 +2558,24 @@ u32 execute_arm_translate(u32 cycles) {
             ((void (*)(void))block)();
             cycles_remaining = (s32)reg[REG_SAVE];
 
+            /* Fast-forward through CPU halt without block-by-block iteration.
+             * The BIOS IntrWait loop writes to HALTCNT each pass, setting
+             * CPU_HALT_STATE.  Running it one block at a time (~4-5 GBA cycles
+             * each) would burn ~60 k dispatch iterations per VBlank frame.
+             * Setting cycles_remaining = -1 triggers the update_gba() path
+             * below immediately, which loops until the halt is cleared (VBlank
+             * fires), advances hardware correctly, and returns the new window.
+             * Never call update_gba(positive) — completed_cycles underflows. */
+            if (reg[CPU_HALT_STATE] == CPU_HALT)
+                cycles_remaining = -1;
+
             cpu_alert_type alert = check_interrupt();
             if (alert & CPU_ALERT_SMC) flush_dynarec_caches();
             if (alert & CPU_ALERT_IRQ) {
                 jit_collapse_flags();
-                execute_arm(cycles_remaining);
-                return 0;
+                check_and_raise_interrupts();
+                jit_extract_flags();
+                /* Continue JIT at interrupt vector (0x00000018 in BIOS) */
             }
 
             /* Safety valve: if cycles haven't gone negative after a huge number

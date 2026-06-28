@@ -220,4 +220,25 @@ static inline void emit_store_reg(uint8_t **ptr, int rs, int idx) {
     emit32(ptr, rv_sw(rs, JIT_REG_BASE, idx * 4));
 }
 
+/* ── Forward-branch patching ───────────────────────────────────────────── */
+
+/* Patch a previously-emitted B-type branch to jump to target.
+ * branch_insn must point to the instruction as emitted with imm=0. */
+static inline void patch_branch(uint8_t *branch_insn, uint8_t *target) {
+    int32_t  off  = (int32_t)(target - branch_insn);
+    uint32_t orig = *(uint32_t *)branch_insn;
+    int f3  = (orig >> 12) & 7;
+    int rs1 = (orig >> 15) & 31;
+    int rs2 = (orig >> 20) & 31;
+    *(uint32_t *)branch_insn = rv_b(0x63, f3, rs1, rs2, off);
+}
+
+/* Patch a previously-emitted JAL (rd=zero or otherwise) to jump to target. */
+static inline void patch_jal(uint8_t *jal_insn, uint8_t *target) {
+    int32_t  off  = (int32_t)(target - jal_insn);
+    uint32_t orig = *(uint32_t *)jal_insn;
+    int rd = (orig >> 7) & 31;
+    *(uint32_t *)jal_insn = rv_j(0x6F, rd, off);
+}
+
 #endif /* RISCV_EMIT_H */

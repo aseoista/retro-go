@@ -189,9 +189,9 @@ Virtual combo: START+SELECT → MENU (two-finger touch or physical button combo)
 
 ## GBA Emulator (`gbsp`) — ESP32-P4 only
 
-GBA emulation via the **libretro/gpsp** core (interpreter-only, no dynarec). Targets `smartbox86` only. Full porting plan in `GBA_porting.md`.
+GBA emulation via the **libretro/gpsp** core with a RISC-V JIT backend (`gbsp/components/gpsp/riscv/dynarec.c`). Targets `smartbox86` only. Full porting plan in `GBA_porting.md`.
 
-### Status (as of 2026-06-26)
+### Status (as of 2026-06-28)
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -201,6 +201,7 @@ GBA emulation via the **libretro/gpsp** core (interpreter-only, no dynarec). Tar
 | 3 | Audio | Pending |
 | 4 | Save system (state + battery) | Pending |
 | 5 | Performance profiling | Done (avg 51 FPS, 56–60 FPS typical, 46 FPS floor in heaviest scenes) |
+| 5.5 | RISC-V JIT backend (Phases A–H) | Done — game ROM blocks translate/execute; BIOS stays in interpreter (IRAM faster than PSRAM JIT); Phase G baseline ~37 FPS on SMA2 title screen |
 | 6 | Polish + launcher integration | Pending |
 
 ### Directory layout
@@ -251,6 +252,28 @@ esptool.py -p /dev/ttyACM0 -b 460800 --chip esp32p4 write_flash @flash_args
 
 **46 FPS floor** in heaviest scenes is the interpreter PSRAM D-cache limit: GBA ROM data reads from PSRAM go through a 32 KB D-cache; heavy-branching games evict cache lines and incur ~25-cycle penalties per miss. Without dynarec there is no practical way to eliminate this.
 
+### Phase 5.5 — RISC-V JIT (dynarec.c)
+
+A RISC-V JIT backend (`gbsp/components/gpsp/riscv/dynarec.c`) was built through Phases A–H. The JIT translates ARM/Thumb GBA ROM blocks into RISC-V blocks cached in PSRAM, then dispatches them via a hash table.
+
+**Performance reality on ESP32-P4**: JIT blocks execute from PSRAM (I-cache bottleneck), while the interpreter runs from IRAM (fast). For SMA2 on the smartbox86 target, hardware measurements showed:
+
+| Configuration | FPS |
+|---|---|
+| Interpreter only (Phase 5) | 51 FPS |
+| JIT for game ROM, interpreter for BIOS (Phase G) | ~37 FPS |
+| JIT for everything incl. BIOS (Phase H, reverted) | ~23 FPS |
+
+The JIT is slower than the interpreter for this game's code profile because PSRAM I-cache misses outweigh the per-instruction compilation savings. The JIT would need to generate much larger basic blocks (loop fusion, common-subexpression elimination) to overcome the PSRAM penalty — simple instruction-by-instruction translation is not enough.
+
+**JIT is kept** as infrastructure (hash table, dispatch loop, block compiler, C helpers for SWI/MRS/MSR/exception-return are all correct). BIOS is excluded from `is_rom_region()` so it runs in the interpreter.
+
+Key design decisions:
+- `HASH_IDX(pc) = (((pc>>2) ^ (pc>>24)) & 0xFFFF)` — region byte XOR prevents BIOS/ROM slot aliasing
+- Halt fast-path: after a block sets `CPU_HALT_STATE`, `cycles_remaining = -1` is forced to trigger `update_gba(-1)` immediately (never call `update_gba` with a positive value — `completed_cycles = execute_cycles - remaining` underflows)
+- IRQ path: `check_and_raise_interrupts()` is called in JIT context (sets PC=0x18, LR_IRQ, mode) then BIOS block lookup fails → interpreter handles BIOS IRQ handler from correct state
+- Exception return (`MOVS PC, lr`; `SUBS PC, lr, #4`): `execute_exception_return()` restores CPSR from SPSR, switches mode, extracts new flags
+
 ## Key Files
 
 | File | Purpose |
@@ -271,6 +294,8 @@ esptool.py -p /dev/ttyACM0 -b 460800 --chip esp32p4 write_flash @flash_args
 | `gbsp/main/main_gba.c` | GBA emulator entry point (retro-go ↔ libretro glue) |
 | `gbsp/components/gpsp/` | Vendored libretro/gpsp interpreter sources |
 | `gbsp/components/gpsp/bios/` | Normatt open-source GBA BIOS as compiled-in C array |
+| `gbsp/components/gpsp/riscv/dynarec.c` | RISC-V JIT backend: dispatch loop, block compiler, C helpers for SWI/MRS/MSR/LDM/exception-return |
+| `gbsp/components/gpsp/riscv/emit.h` | RISC-V instruction emitter (rv_add, rv_sw, emit_cond_begin, etc.) |
 | `GBA_porting.md` | Full phase-by-phase GBA porting plan |
 
 ## Theme & Localization

@@ -297,7 +297,7 @@ void nes_main(void)
         rg_system_tick(rg_system_timer() - startTime);
 
         rg_audio_submit((void*)nes->apu->buffer, nes->apu->samples_per_frame);
-
+#if 0
         if (skipFrames == 0)
         {
             int frameTime = 1000000 / (nes->refresh_rate * app->speed);
@@ -315,7 +315,7 @@ void nes_main(void)
         {
             skipFrames--;
         }
-
+#endif
 #ifdef RG_TARGET_SMARTBOX86
         // On smartbox86 the ES8311 I2S driver's large DMA buffer does not provide
         // frame-pacing backpressure via blocking writes. Pace explicitly here.
