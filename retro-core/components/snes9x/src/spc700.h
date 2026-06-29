@@ -62,7 +62,7 @@ typedef struct
 /* Needed by ILLUSION OF GAIA */
 #define ONE_APU_CYCLE 21
 
-void APUExecute(void);
+void IRAM_ATTR APUExecute(void);
 
 #define APU_EXECUTE1() \
 APUExecute();

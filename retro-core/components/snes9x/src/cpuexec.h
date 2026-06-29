@@ -29,10 +29,10 @@ typedef struct
    uint32_t   UNUSED3;
 } SICPU;
 
-void S9xMainLoop(void);
+void IRAM_ATTR S9xMainLoop(void);
 void S9xReset(void);
 void S9xSoftReset(void);
-void S9xDoHBlankProcessing(void);
+void IRAM_ATTR S9xDoHBlankProcessing(void);
 void S9xClearIRQ(uint32_t source);
 void S9xSetIRQ(uint32_t source);
 

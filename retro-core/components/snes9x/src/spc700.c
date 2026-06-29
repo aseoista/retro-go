@@ -10,7 +10,7 @@
 #include "cpuexec.h"
 #include "apu.h"
 
-static uint8_t S9xAPUGetByteZ(uint8_t Address)
+static IRAM_ATTR uint8_t S9xAPUGetByteZ(uint8_t Address)
 {
    if (Address >= 0xf0 && IAPU.DirectPage == IAPU.RAM)
    {
@@ -36,7 +36,7 @@ static uint8_t S9xAPUGetByteZ(uint8_t Address)
    return IAPU.DirectPage [Address];
 }
 
-static void S9xAPUSetByteZ(uint8_t byte, uint8_t Address)
+static IRAM_ATTR void S9xAPUSetByteZ(uint8_t byte, uint8_t Address)
 {
    if (Address >= 0xf0 && IAPU.DirectPage == IAPU.RAM)
    {
@@ -62,7 +62,7 @@ static void S9xAPUSetByteZ(uint8_t byte, uint8_t Address)
       IAPU.DirectPage [Address] = byte;
 }
 
-static uint8_t S9xAPUGetByte(uint32_t Address)
+static IRAM_ATTR uint8_t S9xAPUGetByte(uint32_t Address)
 {
    bool zero;
    uint8_t t;
@@ -87,7 +87,7 @@ static uint8_t S9xAPUGetByte(uint32_t Address)
    return t;
 }
 
-static void S9xAPUSetByte(uint8_t byte, uint32_t Address)
+static IRAM_ATTR void S9xAPUSetByte(uint8_t byte, uint32_t Address)
 {
    Address &= 0xffff;
 
@@ -332,7 +332,7 @@ if (!(S9xAPUGetByteZ (Work8) & (1 << (b)))) \
 else \
     IAPU.PC += 3
 
-void APUExecute(void/*int32_t target_cycles*/)
+void IRAM_ATTR APUExecute(void/*int32_t target_cycles*/)
 {
    int8_t   Int8;
    int16_t  Int16;

@@ -10,5 +10,5 @@ rg_setup_compile_options(
     -DRIGHTSHIFT_IS_SAR
     -DFAST_LSB_WORD_ACCESS
     -DNO_ZERO_LUT
-    -O2
+    -O3
 )

@@ -10,7 +10,7 @@
 #include "dma.h"
 
 
-void S9xMainLoop()
+void IRAM_ATTR S9xMainLoop()
 {
    do
    {
@@ -94,7 +94,7 @@ void S9xClearIRQ(uint32_t source)
    CLEAR_IRQ_SOURCE(source);
 }
 
-void S9xDoHBlankProcessing()
+void IRAM_ATTR S9xDoHBlankProcessing()
 {
    CPU.WaitCounter++;
    switch (CPU.WhichEvent)
