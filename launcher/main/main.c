@@ -11,6 +11,7 @@
 
 #include "applications.h"
 #include "bookmarks.h"
+#include "prints.h"
 #include "browser.h"
 #include "gui.h"
 #include "webui.h"
@@ -203,6 +204,7 @@ static void retro_loop(void)
     gui_init(app->isColdBoot);
     applications_init();
     bookmarks_init();
+    prints_init();
     // browser_init();
 
 #ifdef RG_ENABLE_NETWORKING

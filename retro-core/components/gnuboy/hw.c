@@ -270,6 +270,8 @@ void gb_hw_vblank(void)
 	hw.frames++;
 	rtc_tick();
 	gb_sound_emulate();
+	if (hw.link && hw.link->tick)
+		hw.link->tick();
 }
 
 

@@ -294,6 +294,36 @@ static const char *translations[][RG_LANG_MAX] =
         [RG_LANG_DE] = "BIOS aktivieren",
     },
     {
+        [RG_LANG_EN] = "Link cable",
+        [RG_LANG_FR] = "Câble link",
+        [RG_LANG_DE] = "Linkkabel",
+    },
+    {
+        [RG_LANG_EN] = "Printer",
+        [RG_LANG_FR] = "Imprimante",
+        [RG_LANG_DE] = "Drucker",
+    },
+    {
+        [RG_LANG_EN] = "Game Boy Printer",
+        [RG_LANG_FR] = "Game Boy Printer",
+        [RG_LANG_DE] = "Game Boy Printer",
+    },
+    {
+        [RG_LANG_EN] = "Print via Bluetooth",
+        [RG_LANG_FR] = "Imprimer via Bluetooth",
+        [RG_LANG_DE] = "Über Bluetooth drucken",
+    },
+    {
+        [RG_LANG_EN] = "%d prints",
+        [RG_LANG_FR] = "%d impressions",
+        [RG_LANG_DE] = "%d Ausdrucke",
+    },
+    {
+        [RG_LANG_EN] = "%d games",
+        [RG_LANG_FR] = "%d jeux",
+        [RG_LANG_DE] = "%d Spiele",
+    },
+    {
         [RG_LANG_EN] = "Name",
         [RG_LANG_FR] = "Nom",
         [RG_LANG_DE] = "Name",

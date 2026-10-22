@@ -100,6 +100,13 @@ typedef enum
 typedef void (gb_video_cb_t)(void *buffer);
 typedef void (gb_audio_cb_t)(void *buffer, size_t length);
 
+typedef struct
+{
+	byte (*transfer)(byte data); // Called when an internal clock transfer completes, returns the byte received
+	void (*tick)(void);          // Called once per frame
+	void (*reset)(void);         // Called on reset and state load
+} gb_link_device_t;
+
 int  gnuboy_init(int samplerate, gb_audio_fmt_t audio_fmt, gb_video_fmt_t video_fmt, gb_video_cb_t *video_callback, gb_audio_cb_t *audio_callback);
 int  gnuboy_load_bios(const byte *data, size_t size);
 int  gnuboy_load_bios_file(const char *file);
@@ -122,6 +129,7 @@ int  gnuboy_get_hwtype(void);
 void gnuboy_set_hwtype(gb_hwtype_t type);
 int  gnuboy_get_palette(void);
 void gnuboy_set_palette(gb_palette_t pal);
+void gnuboy_set_link_device(const gb_link_device_t *device);
 
 int gnuboy_load_sram(const char *file);
 int gnuboy_save_sram(const char *file, bool quick_save);

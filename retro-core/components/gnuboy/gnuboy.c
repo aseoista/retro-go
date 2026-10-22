@@ -43,6 +43,8 @@ void gnuboy_reset(bool hard)
 	gb_lcd_reset(hard);
 	gb_cpu_reset(hard);
 	gb_sound_reset(hard);
+	if (GB.link && GB.link->reset)
+		GB.link->reset();
 }
 
 
@@ -530,6 +532,14 @@ void gnuboy_set_palette(gb_palette_t pal)
 }
 
 
+void gnuboy_set_link_device(const gb_link_device_t *device)
+{
+	if (GB.link && GB.link->reset)
+		GB.link->reset();
+	GB.link = device;
+}
+
+
 bool gnuboy_sram_dirty(void)
 {
 	return cart.sram_dirty != 0;
@@ -908,5 +918,7 @@ int gnuboy_save_state(const char *file)
 
 int gnuboy_load_state(const char *file)
 {
+	if (GB.link && GB.link->reset)
+		GB.link->reset();
 	return do_save_load(file, false);
 }

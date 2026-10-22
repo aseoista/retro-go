@@ -207,7 +207,7 @@ static inline void serial_advance(int cycles)
 		GB.serial -= cycles << 1;
 		if (GB.serial <= 0)
 		{
-			R_SB = 0xFF;
+			R_SB = GB.link ? GB.link->transfer(R_SB) : 0xFF;
 			R_SC &= 0x7f;
 			GB.serial = 0;
 			gb_hw_interrupt(IF_SERIAL, 1);

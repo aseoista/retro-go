@@ -1,7 +1,9 @@
 #include "shared.h"
 
 #include <sys/time.h>
+#include <stdlib.h>
 #include <gnuboy.h>
+#include <printer.h>
 
 static int skipFrames = 0;
 static bool slowFrame = false;
@@ -14,6 +16,9 @@ static int autoSaveSRAM = 0;
 static int autoSaveSRAM_Timer = 0;
 static bool useSystemTime = true;
 static bool loadBIOSFile = false;
+static bool printerEnabled = false;
+static char printFolder[RG_PATH_MAX];
+static int printIndex = -1;
 
 static rg_app_t *app;
 static rg_surface_t *updates[2];
@@ -23,6 +28,7 @@ static const char *SETTING_SAVESRAM = "SaveSRAM";
 static const char *SETTING_PALETTE  = "Palette";
 static const char *SETTING_SYSTIME = "SysTime";
 static const char *SETTING_LOADBIOS = "LoadBIOS";
+static const char *SETTING_PRINTER = "LinkPrinter";
 // --- MAIN
 
 
@@ -40,6 +46,10 @@ static void event_handler(int event, void *arg)
     if (event == RG_EVENT_REDRAW)
     {
         rg_display_submit(currentUpdate, 0);
+    }
+    else if (event == RG_EVENT_SHUTDOWN)
+    {
+        gb_printer_flush(); // Don't lose a page that the game is still sending
     }
 }
 
@@ -156,6 +166,66 @@ static rg_gui_event_t enable_bios_cb(rg_gui_option_t *option, rg_gui_event_t eve
     return RG_DIALOG_VOID;
 }
 
+static int find_print_index_cb(const rg_scandir_t *file, void *arg)
+{
+    int *index = (int *)arg;
+    *index = RG_MAX(*index, atoi(file->basename) + 1);
+    return RG_SCANDIR_CONTINUE;
+}
+
+static void printer_page_cb(const uint8_t *pixels, int width, int height)
+{
+    static const uint8_t shades[4] = {0xFF, 0xAA, 0x55, 0x00};
+    char path[RG_PATH_MAX + 16];
+
+    rg_surface_t *surface = rg_surface_create(width, height, RG_PIXEL_888, MEM_ANY);
+    if (!surface)
+    {
+        RG_LOGE("Unable to allocate %dx%d print!", width, height);
+        return;
+    }
+
+    for (int y = 0; y < height; y++)
+    {
+        uint8_t *dst = (uint8_t *)surface->data + y * surface->stride;
+        for (int x = 0; x < width; x++, dst += 3)
+            dst[0] = dst[1] = dst[2] = shades[*pixels++ & 3];
+    }
+
+    if (printIndex < 0)
+    {
+        printIndex = 1;
+        rg_storage_scandir(printFolder, find_print_index_cb, &printIndex, RG_SCANDIR_FILES);
+    }
+
+    snprintf(path, sizeof(path), "%s/%04d.png", printFolder, printIndex);
+
+    if (rg_storage_mkdir(printFolder) && rg_surface_save_image_file(surface, path, 0, 0))
+    {
+        RG_LOGI("Print saved to '%s'", path);
+        rg_system_set_led_color(C_BLUE); // The system monitor will turn it off on its next pass
+        printIndex++;
+    }
+    else
+    {
+        RG_LOGE("Unable to save print to '%s'", path);
+    }
+
+    rg_surface_free(surface);
+}
+
+static rg_gui_event_t printer_cb(rg_gui_option_t *option, rg_gui_event_t event)
+{
+    if (event == RG_DIALOG_PREV || event == RG_DIALOG_NEXT)
+    {
+        printerEnabled = !printerEnabled;
+        rg_settings_set_number(NS_FILE, SETTING_PRINTER, printerEnabled);
+        gnuboy_set_link_device(printerEnabled ? &gb_printer_device : NULL);
+    }
+    strcpy(option->value, printerEnabled ? _("Printer") : _("None"));
+    return RG_DIALOG_VOID;
+}
+
 static rg_gui_event_t rtc_t_update_cb(rg_gui_option_t *option, rg_gui_event_t event)
 {
     int d, h, m, s;
@@ -238,6 +308,7 @@ static void options_handler(rg_gui_option_t *dest)
     *dest++ = (rg_gui_option_t){0, _("RTC config"),    "-", RG_DIALOG_FLAG_NORMAL, &rtc_update_cb};
     *dest++ = (rg_gui_option_t){0, _("SRAM autosave"), "-", RG_DIALOG_FLAG_NORMAL, &sram_autosave_cb};
     *dest++ = (rg_gui_option_t){0, _("Enable BIOS"),   "-", RG_DIALOG_FLAG_NORMAL, &enable_bios_cb};
+    *dest++ = (rg_gui_option_t){0, _("Link cable"),    "-", RG_DIALOG_FLAG_NORMAL, &printer_cb};
     *dest++ = (rg_gui_option_t)RG_DIALOG_END;
 }
 
@@ -260,6 +331,7 @@ void gbc_main(void)
 
     useSystemTime = (bool)rg_settings_get_number(NS_APP, SETTING_SYSTIME, 1);
     loadBIOSFile = (bool)rg_settings_get_number(NS_APP, SETTING_LOADBIOS, 0);
+    printerEnabled = (bool)rg_settings_get_number(NS_FILE, SETTING_PRINTER, 0);
     autoSaveSRAM = (int)rg_settings_get_number(NS_APP, SETTING_SAVESRAM, 0);
     sramFile = rg_emu_get_path(RG_PATH_SAVE_SRAM, app->romPath);
 
@@ -269,6 +341,15 @@ void gbc_main(void)
     // Initialize the emulator
     if (gnuboy_init(app->sampleRate, GB_AUDIO_STEREO_S16, GB_PIXEL_565_BE, &video_callback, &audio_callback) < 0)
         RG_PANIC("Emulator init failed!");
+
+    // The printer is only attached on demand so that link cable detection behaves as before
+    snprintf(printFolder, sizeof(printFolder), "%s/%s", RG_BASE_PATH_PRINTS, rg_basename(app->romPath));
+    char *romExt = strrchr(printFolder, '.');
+    if (romExt && romExt > strrchr(printFolder, '/'))
+        *romExt = 0;
+    gb_printer_init(&printer_page_cb);
+    if (printerEnabled)
+        gnuboy_set_link_device(&gb_printer_device);
 
     gnuboy_set_framebuffer(currentUpdate->data);
     gnuboy_set_soundbuffer(malloc(AUDIO_BUFFER_LENGTH * 4), AUDIO_BUFFER_LENGTH);

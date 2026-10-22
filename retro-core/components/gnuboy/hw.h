@@ -222,6 +222,7 @@ typedef struct
 	int pad;		// Button status
 
 	int serial; 	// Serial cycle counter
+	const gb_link_device_t *link; // Device on the other end of the link cable (NULL = none)
 	int hdma; 		// DMA cycle counter
 
 	int hwtype;		// type of emulated device
