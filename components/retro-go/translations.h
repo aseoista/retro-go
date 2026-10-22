@@ -324,6 +324,91 @@ static const char *translations[][RG_LANG_MAX] =
         [RG_LANG_DE] = "%d Spiele",
     },
     {
+        [RG_LANG_EN] = "Print",
+        [RG_LANG_FR] = "Imprimer",
+        [RG_LANG_DE] = "Drucken",
+    },
+    {
+        [RG_LANG_EN] = "Darkness",
+        [RG_LANG_FR] = "Contraste",
+        [RG_LANG_DE] = "Dunkelheit",
+    },
+    {
+        [RG_LANG_EN] = "Copies",
+        [RG_LANG_FR] = "Copies",
+        [RG_LANG_DE] = "Kopien",
+    },
+    {
+        [RG_LANG_EN] = "Back",
+        [RG_LANG_FR] = "Retour",
+        [RG_LANG_DE] = "Zurück",
+    },
+    {
+        [RG_LANG_EN] = "Select printer",
+        [RG_LANG_FR] = "Choisir l'imprimante",
+        [RG_LANG_DE] = "Drucker auswählen",
+    },
+    {
+        [RG_LANG_EN] = "Searching for printers...",
+        [RG_LANG_FR] = "Recherche d'imprimantes...",
+        [RG_LANG_DE] = "Suche nach Druckern...",
+    },
+    {
+        [RG_LANG_EN] = "Bluetooth initialization failed",
+        [RG_LANG_FR] = "Échec de l'initialisation Bluetooth",
+        [RG_LANG_DE] = "Bluetooth-Initialisierung fehlgeschlagen",
+    },
+    {
+        [RG_LANG_EN] = "No device found",
+        [RG_LANG_FR] = "Aucun appareil trouvé",
+        [RG_LANG_DE] = "Kein Gerät gefunden",
+    },
+    {
+        [RG_LANG_EN] = "Save to SD card (debug)",
+        [RG_LANG_FR] = "Enregistrer sur la carte SD (debug)",
+        [RG_LANG_DE] = "Auf SD-Karte speichern (Debug)",
+    },
+    {
+        [RG_LANG_EN] = "Unable to load the picture",
+        [RG_LANG_FR] = "Impossible de charger l'image",
+        [RG_LANG_DE] = "Bild kann nicht geladen werden",
+    },
+    {
+        [RG_LANG_EN] = "Connecting to %s...",
+        [RG_LANG_FR] = "Connexion à %s...",
+        [RG_LANG_DE] = "Verbinde mit %s...",
+    },
+    {
+        [RG_LANG_EN] = "Unable to connect to the printer",
+        [RG_LANG_FR] = "Impossible de se connecter à l'imprimante",
+        [RG_LANG_DE] = "Verbindung zum Drucker fehlgeschlagen",
+    },
+    {
+        [RG_LANG_EN] = "Printing... %d%%",
+        [RG_LANG_FR] = "Impression... %d%%",
+        [RG_LANG_DE] = "Drucke... %d%%",
+    },
+    {
+        [RG_LANG_EN] = "Waiting for the printer...",
+        [RG_LANG_FR] = "En attente de l'imprimante...",
+        [RG_LANG_DE] = "Warte auf den Drucker...",
+    },
+    {
+        [RG_LANG_EN] = "Connection lost",
+        [RG_LANG_FR] = "Connexion perdue",
+        [RG_LANG_DE] = "Verbindung verloren",
+    },
+    {
+        [RG_LANG_EN] = "Done!",
+        [RG_LANG_FR] = "Terminé !",
+        [RG_LANG_DE] = "Fertig!",
+    },
+    {
+        [RG_LANG_EN] = "Printing failed",
+        [RG_LANG_FR] = "Échec de l'impression",
+        [RG_LANG_DE] = "Drucken fehlgeschlagen",
+    },
+    {
         [RG_LANG_EN] = "Name",
         [RG_LANG_FR] = "Nom",
         [RG_LANG_DE] = "Name",
