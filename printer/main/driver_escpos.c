@@ -43,24 +43,34 @@ static bool escpos_feed(const printer_transport_t *transport, int lines)
     return write_all(transport, feed, lines);
 }
 
-static bool escpos_end_job(const printer_transport_t *transport, char *error, size_t error_size)
+static print_result_t escpos_end_job(const printer_transport_t *transport, const print_options_t *options,
+                                     char *error, size_t error_size)
 {
     // The printer answers the paper/error query only after having processed everything before it,
-    // so the reply also tells us that the whole job was received.
+    // so the reply also tells us that the whole job was received. Some printers never answer it.
     const uint8_t query[] = {0x1D, 0x67, 0x53};
     char reply[64] = {0};
     size_t length = 0;
 
-    if (!escpos_feed(transport, 4) || !write_all(transport, query, sizeof(query)))
+    if (!escpos_feed(transport, 4) || (options->query_status && !write_all(transport, query, sizeof(query))))
     {
         snprintf(error, error_size, "Connection lost");
-        return false;
+        return PRINT_FAILED;
     }
+
+    if (!options->query_status)
+        return PRINT_UNCONFIRMED;
 
     int64_t deadline = rg_system_timer() + REPLY_TIMEOUT_MS * 1000LL;
     while (rg_system_timer() < deadline && length < sizeof(reply) - 1)
     {
-        int ret = transport->read(reply + length, sizeof(reply) - 1 - length, 500);
+        if (options->cancelled && options->cancelled())
+        {
+            RG_LOGW("Stopped waiting for the printer's status (got '%s')", reply);
+            return PRINT_UNCONFIRMED;
+        }
+
+        int ret = transport->read(reply + length, sizeof(reply) - 1 - length, 250);
         if (ret < 0)
             break;
         length += ret;
@@ -80,13 +90,12 @@ static bool escpos_end_job(const printer_transport_t *transport, char *error, si
                 snprintf(error, error_size, "Printer battery low");
             else if (code)
                 snprintf(error, error_size, "Printer error 0x%02X", code);
-            return code == 0;
+            return code ? PRINT_FAILED : PRINT_DONE;
         }
     }
 
-    // Not every ESC/POS printer implements that query, the job most likely went through anyway
     RG_LOGW("No status reply from the printer (got '%s')", reply);
-    return true;
+    return PRINT_UNCONFIRMED;
 }
 
 const printer_driver_t driver_escpos = {

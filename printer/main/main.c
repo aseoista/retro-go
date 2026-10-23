@@ -13,6 +13,7 @@
 #define SETTING_NAME     "PrinterName"
 #define SETTING_DARKNESS "Darkness"
 #define SETTING_COPIES   "Copies"
+#define SETTING_STATUS   "PrinterStatus" // Does the printer answer status queries? -1 = unknown, 0 = no, 1 = yes
 
 #define FILE_ADDRESS     "file" // Pseudo printer: dump the data stream to the SD card
 #define BAND_ROWS        64
@@ -24,6 +25,7 @@ static char *printer_address;
 static char *printer_name;
 static int darkness;
 static int copies;
+static int printer_status;
 
 static void draw_picture(void)
 {
@@ -49,8 +51,10 @@ static void set_printer(const char *address, const char *name)
     free(printer_name);
     printer_address = strdup(address);
     printer_name = strdup(name);
+    printer_status = -1;
     rg_settings_set_string(NS_APP, SETTING_ADDRESS, address);
     rg_settings_set_string(NS_APP, SETTING_NAME, name);
+    rg_settings_set_number(NS_APP, SETTING_STATUS, printer_status);
     rg_settings_commit();
 }
 
@@ -96,11 +100,17 @@ static bool choose_printer(void)
     return sel != RG_DIALOG_CANCELLED;
 }
 
+static bool skip_pressed(void)
+{
+    return rg_input_key_is_pressed(RG_KEY_B);
+}
+
 static void print_picture(void)
 {
     const printer_driver_t *driver = &driver_escpos;
     const printer_transport_t *transport = &transport_spp;
     char error[64] = {0};
+    print_result_t result = PRINT_FAILED;
     bool success = false;
 
     if (!printer_address[0] && !choose_printer())
@@ -124,7 +134,11 @@ static void print_picture(void)
         goto done;
     }
 
-    print_options_t options = {.darkness = darkness};
+    print_options_t options = {
+        .darkness = darkness,
+        .query_status = printer_status != 0,
+        .cancelled = skip_pressed,
+    };
     int rows = render_rows_count(render);
     success = driver->begin_job(transport, &options);
 
@@ -143,13 +157,28 @@ static void print_picture(void)
 
     if (success)
     {
-        rg_gui_draw_message(_("Waiting for the printer..."));
-        success = driver->end_job(transport, error, sizeof(error));
+        if (options.query_status)
+            rg_gui_draw_message(_("Waiting for the printer... (B: skip)"));
+        result = driver->end_job(transport, &options, error, sizeof(error));
+        success = result != PRINT_FAILED;
     }
     else
     {
         snprintf(error, sizeof(error), "%s", _("Connection lost"));
     }
+
+    // Remember whether this printer answers, so that we don't wait for nothing next time
+    if ((result == PRINT_DONE && printer_status != 1) || (result == PRINT_UNCONFIRMED && printer_status == -1))
+    {
+        printer_status = result == PRINT_DONE;
+        rg_settings_set_number(NS_APP, SETTING_STATUS, printer_status);
+        rg_settings_commit();
+        RG_LOGI("Printer status replies: %s", printer_status ? "yes" : "no");
+    }
+
+    // Without confirmation, give the last bytes some time to leave the radio before disconnecting
+    if (result == PRINT_UNCONFIRMED)
+        rg_task_delay(2000);
 
     transport->close();
 
@@ -214,6 +243,7 @@ void app_main(void)
     printer_name = rg_settings_get_string(NS_APP, SETTING_NAME, "");
     darkness = RG_MIN(RG_MAX(rg_settings_get_number(NS_APP, SETTING_DARKNESS, 15), 1), 15);
     copies = RG_MIN(RG_MAX(rg_settings_get_number(NS_APP, SETTING_COPIES, 1), 1), 5);
+    printer_status = rg_settings_get_number(NS_APP, SETTING_STATUS, -1);
 
     picture = rg_surface_load_image_file(app->romPath, 0);
     if (!picture)

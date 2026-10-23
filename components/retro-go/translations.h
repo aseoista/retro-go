@@ -389,9 +389,9 @@ static const char *translations[][RG_LANG_MAX] =
         [RG_LANG_DE] = "Drucke... %d%%",
     },
     {
-        [RG_LANG_EN] = "Waiting for the printer...",
-        [RG_LANG_FR] = "En attente de l'imprimante...",
-        [RG_LANG_DE] = "Warte auf den Drucker...",
+        [RG_LANG_EN] = "Waiting for the printer... (B: skip)",
+        [RG_LANG_FR] = "En attente de l'imprimante... (B : passer)",
+        [RG_LANG_DE] = "Warte auf den Drucker... (B: überspringen)",
     },
     {
         [RG_LANG_EN] = "Connection lost",
