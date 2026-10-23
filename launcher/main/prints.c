@@ -122,11 +122,8 @@ static bool show_print_menu(const char *path)
         {0, _("Close"), NULL, RG_DIALOG_FLAG_NORMAL, NULL},
         RG_DIALOG_END,
     };
-    char title[64];
 
-    snprintf(title, sizeof(title), "%s/%s", rg_basename(current_path), rg_basename(path));
-
-    switch (rg_gui_dialog(title, options, 0))
+    switch (rg_gui_dialog(NULL, options, 0))
     {
     case 1:
         gui_save_config();
