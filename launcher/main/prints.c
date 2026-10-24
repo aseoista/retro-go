@@ -119,11 +119,10 @@ static bool show_print_menu(const char *path)
     const rg_gui_option_t options[] = {
         {1, _("Print via Bluetooth"), NULL, have_printer ? RG_DIALOG_FLAG_NORMAL : RG_DIALOG_FLAG_HIDDEN, NULL},
         {2, _("Delete file"), NULL, RG_DIALOG_FLAG_NORMAL, NULL},
-        {0, _("Close"), NULL, RG_DIALOG_FLAG_NORMAL, NULL},
         RG_DIALOG_END,
     };
 
-    switch (rg_gui_dialog(NULL, options, 0))
+    switch (rg_gui_dialog(rg_basename(path), options, 0))
     {
     case 1:
         gui_save_config();
