@@ -14,7 +14,7 @@ import zlib
 DEFAULT_TARGET = os.getenv("RG_TOOL_TARGET", "odroid-go")
 DEFAULT_BAUD = os.getenv("RG_TOOL_BAUD", "1152000")
 DEFAULT_PORT = os.getenv("RG_TOOL_PORT", "COM3")
-DEFAULT_APPS = os.getenv("RG_TOOL_APPS", "launcher retro-core prboom-go gwenesis fmsx")
+DEFAULT_APPS = os.getenv("RG_TOOL_APPS", "launcher retro-core prboom-go gwenesis fmsx gbsp")
 PROJECT_NAME = os.getenv("PROJECT_NAME", "Retro-Go")
 PROJECT_ICON = os.getenv("PROJECT_ICON", "assets/icon.raw")
 PROJECT_APPS = {
@@ -24,6 +24,11 @@ PROJECT_APPS = {
   'prboom-go':    [0, 16, 786432],
   'gwenesis':     [0, 16, 1048576],
   'fmsx':         [0, 16, 589824],
+  'gbsp':         [0, 16, 2097152],
+}
+# Apps that only build for some IDF targets (left out of "all" elsewhere)
+PROJECT_APPS_TARGETS = {
+  'gbsp':         ['esp32p4'], # RV32 JIT
 }
 # PROJECT_APPS = {}
 # for t in glob.glob("*/CMakeLists.txt"):
@@ -120,6 +125,12 @@ def build_app(app, device_type, with_profiling=False, no_networking=False, is_re
     args.append(f"-DRG_BUILD_RELEASE={1 if is_release else 0}")
     args.append(f"-DRG_ENABLE_PROFILING={1 if with_profiling else 0}")
     args.append(f"-DRG_ENABLE_NETWORKING={0 if no_networking else 1}")
+    # An app can override the target's sdkconfig with its own sdkconfig.defaults
+    app_sdkconfig = os.path.abspath(os.path.join(app, "sdkconfig.defaults"))
+    if TARGET_SDKCONFIG and os.path.exists(app_sdkconfig):
+        os.putenv("SDKCONFIG_DEFAULTS", f"{TARGET_SDKCONFIG};{app_sdkconfig}")
+    elif TARGET_SDKCONFIG:
+        os.putenv("SDKCONFIG_DEFAULTS", TARGET_SDKCONFIG)
     # IDF 5.x resolves CONFIG_PARTITION_TABLE_CUSTOM_FILENAME relative to the app project dir,
     # not the repo root. Write the dummy CSV there so the build finds it.
     for csv_path in ["partitions.csv", os.path.join(app, "partitions.csv")]:
@@ -195,12 +206,16 @@ if os.path.exists(f"components/retro-go/targets/{args.target}/env.py"):
         if os.getenv("IDF_TARGET") != prev_idf_target:
             IDF_TARGET = os.getenv("IDF_TARGET")
 
+TARGET_SDKCONFIG = None
 if os.path.exists(f"components/retro-go/targets/{args.target}/sdkconfig"):
-    os.putenv("SDKCONFIG_DEFAULTS", os.path.abspath(f"components/retro-go/targets/{args.target}/sdkconfig"))
+    TARGET_SDKCONFIG = os.path.abspath(f"components/retro-go/targets/{args.target}/sdkconfig")
+    os.putenv("SDKCONFIG_DEFAULTS", TARGET_SDKCONFIG)
 os.putenv("IDF_TARGET", IDF_TARGET)
 
 command = args.command
 apps = DEFAULT_APPS.split() if "all" in args.apps else args.apps
+if "all" in args.apps:
+    apps = [app for app in apps if IDF_TARGET in PROJECT_APPS_TARGETS.get(app, [IDF_TARGET])]
 apps = [app for app in PROJECT_APPS.keys() if app in apps] # Ensure ordering and uniqueness
 
 try:

@@ -27,6 +27,10 @@
 // NS4150B power amplifier enable (active HIGH)
 #define RG_GPIO_SND_AMP_ENABLE    GPIO_NUM_53
 
+// GT911 touch driver reports a spurious MENU-zone touch during reset; disable the
+// hold-at-boot recovery trigger to prevent it from firing on every clean boot.
+#define RG_RECOVERY_BTN RG_KEY_NONE
+
 // --- Input ---
 // Physical GPIO buttons (Phase 2, tentative — must re-verify against schematic)
 // *** WARNING: KNOWN GPIO CONFLICTS with Phase 5/6 peripherals: ***

@@ -1,0 +1,19 @@
+# Emulator state goes to PSRAM BSS: internal RAM is short with the 256KB L2 cache, and the
+# JIT keeps the hot paths in cache well enough (measured within noise of upstream's layout).
+[scheme:gpsp_psram_bss]
+entries:
+    bss -> extern_ram
+    common -> extern_ram
+
+[mapping:gpsp]
+archive: libgpsp.a
+entries:
+    if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+        gba_memory (gpsp_psram_bss)
+        rv32_ram_units (gpsp_psram_bss)
+        cpu:ewram (gpsp_psram_bss)
+        cpu:iwram (gpsp_psram_bss)
+        cpu:vram (gpsp_psram_bss)
+        cpu:memory_map_read (gpsp_psram_bss)
+        sound:sound_buffer (gpsp_psram_bss)
+        video:_ZL17obj_priority_list (gpsp_psram_bss)

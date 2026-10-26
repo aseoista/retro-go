@@ -74,6 +74,7 @@ static const struct {
     { 32000, 0x10 },
     { 44100, 0x10 },
     { 48000, 0x10 },
+    { 65536, 0x10 }, // GBA
 };
 
 static i2s_chan_handle_t s_tx       = NULL;
@@ -213,8 +214,9 @@ static bool es_i2s_init(int rate)
 {
     i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     chan.auto_clear    = true;
-    chan.dma_desc_num  = 4;
     chan.dma_frame_num = 480;
+    // Hold at least ~50ms so a slow frame doesn't underrun; at 65536Hz (GBA) 4 buffers is only 29ms.
+    chan.dma_desc_num  = RG_MAX(4, (rate / 20 + chan.dma_frame_num - 1) / chan.dma_frame_num);
 
     if (i2s_new_channel(&chan, &s_tx, NULL) != ESP_OK) {
         s_error = "i2s_new_channel failed";
