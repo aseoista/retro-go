@@ -194,3 +194,4 @@ If you wish to build or modify Retro-Go, you can find help in the following docu
 Everything in this project is licensed under the [GPLv2 license](COPYING) with the exception of the following components:
 - fmsx/components/fmsx (MSX Emulator, custom non-commercial license)
 - handy-go/components/handy (Lynx emulator, zlib)
+- gbsp/components/gpsp (GBA emulator, GPL-3.0-or-later as a whole; see its UPSTREAM.md)
