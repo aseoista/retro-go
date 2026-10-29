@@ -29,6 +29,7 @@ static inline uint32_t snes_prof_cycles(void)
 extern uint32_t snes_prof_render_cycles;
 extern uint32_t snes_prof_apu_cycles;
 extern uint32_t snes_prof_sync_cycles; /* CPU core waiting on the render task */
+extern uint32_t snes_prof_render_calls;
 
 #define PROF_START()     uint32_t _prof_t0 = snes_prof_cycles()
 #define PROF_END(acc)    ((acc) += snes_prof_cycles() - _prof_t0)

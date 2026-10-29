@@ -15,6 +15,12 @@
 #endif
 
 #ifdef SNES_RENDER_MT
+/* Window positions ($2126-$2129, packed W1L | W1R << 8 | W2L << 16 | W2R << 24) latched at the
+ * end of each scanline like the BG scroll offsets, so per-line window HDMA doesn't force the
+ * CPU core to wait for the renderer. RenderWindows holds what the render task last applied. */
+extern uint32_t LineWindows[240];
+extern uint32_t RenderWindows;
+
 bool S9xRenderThreadInit(void);
 void S9xRenderNewFrame(void);
 void S9xRenderPublish(int32_t lines);

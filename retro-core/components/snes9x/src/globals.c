@@ -32,6 +32,7 @@ uint8_t OpenBus = 0;
 uint32_t snes_prof_render_cycles = 0;
 uint32_t snes_prof_apu_cycles = 0;
 uint32_t snes_prof_sync_cycles = 0;
+uint32_t snes_prof_render_calls = 0;
 #endif
 
 SPPU PPU;

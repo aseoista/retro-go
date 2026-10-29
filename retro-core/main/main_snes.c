@@ -100,6 +100,13 @@ static const char *SNES_BUTTONS[] = {
 	"None", "None", "None", "None", "R", "L", "X", "A", "Right", "Left", "Down", "Up", "Start", "Select", "Y", "B"
 };
 
+#ifdef RG_TARGET_SMARTBOX86
+// The renderer's per-pixel buffers are worth internal RAM on the P4 (PSRAM-bound)
+#define SNES_RENDER_MEM MEM_FAST
+#else
+#define SNES_RENDER_MEM MEM_ANY
+#endif
+
 #define AUDIO_LOW_PASS_RANGE ((60 * 65536) / 100)
 
 static rg_app_t *app;
@@ -261,8 +268,8 @@ bool S9xInitDisplay(void)
     GFX.ZPitch = SNES_WIDTH;
     GFX.Screen = currentUpdate->data;
     GFX.SubScreen = malloc(GFX.Pitch * SNES_HEIGHT_EXTENDED);
-    GFX.ZBuffer = malloc(GFX.ZPitch * SNES_HEIGHT_EXTENDED);
-    GFX.SubZBuffer = malloc(GFX.ZPitch * SNES_HEIGHT_EXTENDED);
+    GFX.ZBuffer = rg_alloc(GFX.ZPitch * SNES_HEIGHT_EXTENDED, SNES_RENDER_MEM);
+    GFX.SubZBuffer = rg_alloc(GFX.ZPitch * SNES_HEIGHT_EXTENDED, SNES_RENDER_MEM);
     return GFX.Screen && GFX.SubScreen && GFX.ZBuffer && GFX.SubZBuffer;
 }
 
@@ -423,6 +430,7 @@ void snes_main(void)
     int64_t prof_emu = 0, prof_disp = 0, prof_mix = 0, prof_audio = 0, prof_busy_max = 0;
     int64_t prof_window_start = rg_system_timer();
     int prof_ticks = 0, prof_over = 0;
+    uint32_t prof_last_render = 0, prof_last_sync = 0, prof_render_max = 0, prof_sync_max = 0;
     snes_prof_render_cycles = snes_prof_apu_cycles = snes_prof_sync_cycles = 0;
 #endif
 
@@ -517,6 +525,15 @@ void snes_main(void)
         prof_audio += tE - tD;
         if (busy > prof_busy_max)
             prof_busy_max = busy;
+        // Worst single frame, to tell a render spike from CPU/render serialization
+        uint32_t render_frame = snes_prof_render_cycles - prof_last_render;
+        uint32_t sync_frame = snes_prof_sync_cycles - prof_last_sync;
+        prof_last_render = snes_prof_render_cycles;
+        prof_last_sync = snes_prof_sync_cycles;
+        if (render_frame > prof_render_max)
+            prof_render_max = render_frame;
+        if (sync_frame > prof_sync_max)
+            prof_sync_max = sync_frame;
         if (busy > app->frameTime)
             prof_over++;
 
@@ -532,17 +549,21 @@ void snes_main(void)
         #else
             int cpu = emu - spc - render;
         #endif
-            RG_LOGI("PROF fps=%.1f emu=%d (cpu=%d ppu=%d spc=%d sync=%d) disp=%d mix=%d audio=%d busy_max=%d over=%d/%d heap_int=%d\n",
+            RG_LOGI("PROF fps=%.1f emu=%d (cpu=%d ppu=%d spc=%d sync=%d) disp=%d mix=%d audio=%d busy_max=%d ppu_max=%d sync_max=%d calls=%d over=%d/%d heap_int=%d\n",
                 prof_ticks * 1000000.f / (tE - prof_window_start),
                 emu, cpu, render, spc, sync,
                 (int)(prof_disp / prof_ticks),
                 (int)(prof_mix / prof_ticks),
                 (int)(prof_audio / prof_ticks),
-                (int)prof_busy_max, prof_over, prof_ticks,
+                (int)prof_busy_max, (int)(prof_render_max / cyclesPerUs), (int)(prof_sync_max / cyclesPerUs),
+                (int)(snes_prof_render_calls / prof_ticks),
+                prof_over, prof_ticks,
                 (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             prof_emu = prof_disp = prof_mix = prof_audio = prof_busy_max = 0;
             prof_ticks = prof_over = 0;
             snes_prof_render_cycles = snes_prof_apu_cycles = snes_prof_sync_cycles = 0;
+            prof_last_render = prof_last_sync = prof_render_max = prof_sync_max = 0;
+            snes_prof_render_calls = 0;
             prof_window_start = rg_system_timer();
         }
 #endif

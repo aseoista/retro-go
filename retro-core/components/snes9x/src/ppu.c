@@ -390,33 +390,49 @@ void S9xSetPPU(uint8_t Byte, uint16_t Address)
       case 0x2126: /* Window 1 left position */
          if (Byte != Memory.FillRAM [0x2126])
          {
+#ifdef SNES_RENDER_MT
+            PPU.Window1Left = Byte; /* latched per line, see LineWindows */
+#else
             FLUSH_REDRAW();
             PPU.Window1Left = Byte;
             PPU.RecomputeClipWindows = true;
+#endif
          }
          break;
       case 0x2127: /* Window 1 right position */
          if (Byte != Memory.FillRAM [0x2127])
          {
+#ifdef SNES_RENDER_MT
+            PPU.Window1Right = Byte; /* latched per line, see LineWindows */
+#else
             FLUSH_REDRAW();
             PPU.Window1Right = Byte;
             PPU.RecomputeClipWindows = true;
+#endif
          }
          break;
       case 0x2128: /* Window 2 left position */
          if (Byte != Memory.FillRAM [0x2128])
          {
+#ifdef SNES_RENDER_MT
+            PPU.Window2Left = Byte; /* latched per line, see LineWindows */
+#else
             FLUSH_REDRAW();
             PPU.Window2Left = Byte;
             PPU.RecomputeClipWindows = true;
+#endif
          }
          break;
       case 0x2129: /* Window 2 right position */
          if (Byte != Memory.FillRAM [0x2129])
          {
+#ifdef SNES_RENDER_MT
+            PPU.Window2Right = Byte; /* latched per line, see LineWindows */
+#else
             FLUSH_REDRAW();
             PPU.Window2Right = Byte;
             PPU.RecomputeClipWindows = true;
+#endif
          }
          break;
       case 0x212a: /* Windows 1 & 2 overlap logic for backgrounds 1 - 4 */

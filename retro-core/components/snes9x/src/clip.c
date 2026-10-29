@@ -6,6 +6,18 @@
 #include "memmap.h"
 #include "ppu.h"
 
+#ifdef SNES_RENDER_MT
+#define WINDOW1_LEFT  ((uint8_t)(RenderWindows))
+#define WINDOW1_RIGHT ((uint8_t)(RenderWindows >> 8))
+#define WINDOW2_LEFT  ((uint8_t)(RenderWindows >> 16))
+#define WINDOW2_RIGHT ((uint8_t)(RenderWindows >> 24))
+#else
+#define WINDOW1_LEFT  PPU.Window1Left
+#define WINDOW1_RIGHT PPU.Window1Right
+#define WINDOW2_LEFT  PPU.Window2Left
+#define WINDOW2_RIGHT PPU.Window2Right
+#endif
+
 typedef struct
 {
    uint32_t Left;
@@ -98,19 +110,19 @@ void ComputeClipWindows()
                {
                   if (!PPU.ClipWindow1Inside [w])
                   {
-                     Win1[Window1Enabled].Left = PPU.Window1Left;
-                     Win1[Window1Enabled++].Right = PPU.Window1Right + 1;
+                     Win1[Window1Enabled].Left = WINDOW1_LEFT;
+                     Win1[Window1Enabled++].Right = WINDOW1_RIGHT + 1;
                   }
-                  else if (PPU.Window1Left <= PPU.Window1Right)
+                  else if (WINDOW1_LEFT <= WINDOW1_RIGHT)
                   {
-                     if (PPU.Window1Left > 0)
+                     if (WINDOW1_LEFT > 0)
                      {
                         Win1[Window1Enabled].Left = 0;
-                        Win1[Window1Enabled++].Right = PPU.Window1Left;
+                        Win1[Window1Enabled++].Right = WINDOW1_LEFT;
                      }
-                     if (PPU.Window1Right < 255)
+                     if (WINDOW1_RIGHT < 255)
                      {
-                        Win1[Window1Enabled].Left = PPU.Window1Right + 1;
+                        Win1[Window1Enabled].Left = WINDOW1_RIGHT + 1;
                         Win1[Window1Enabled++].Right = 256;
                      }
                      if (Window1Enabled == 0)
@@ -131,21 +143,21 @@ void ComputeClipWindows()
                {
                   if (!PPU.ClipWindow2Inside [w])
                   {
-                     Win2[Window2Enabled].Left = PPU.Window2Left;
-                     Win2[Window2Enabled++].Right = PPU.Window2Right + 1;
+                     Win2[Window2Enabled].Left = WINDOW2_LEFT;
+                     Win2[Window2Enabled++].Right = WINDOW2_RIGHT + 1;
                   }
                   else
                   {
-                     if (PPU.Window2Left <= PPU.Window2Right)
+                     if (WINDOW2_LEFT <= WINDOW2_RIGHT)
                      {
-                        if (PPU.Window2Left > 0)
+                        if (WINDOW2_LEFT > 0)
                         {
                            Win2[Window2Enabled].Left = 0;
-                           Win2[Window2Enabled++].Right = PPU.Window2Left;
+                           Win2[Window2Enabled++].Right = WINDOW2_LEFT;
                         }
-                        if (PPU.Window2Right < 255)
+                        if (WINDOW2_RIGHT < 255)
                         {
-                           Win2[Window2Enabled].Left = PPU.Window2Right + 1;
+                           Win2[Window2Enabled].Left = WINDOW2_RIGHT + 1;
                            Win2[Window2Enabled++].Right = 256;
                         }
                         if (Window2Enabled == 0)

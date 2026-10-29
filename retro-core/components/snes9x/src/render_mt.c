@@ -47,9 +47,21 @@ static void render_task_func(void *arg)
          IPPU.PreviousLine = 0;
       }
 
+      /* Draw in runs of lines that share the same window positions */
       int32_t lines = pub & 0xFFFF;
-      if (lines != IPPU.PreviousLine)
-         S9xUpdateScreenTo(lines);
+      while (IPPU.PreviousLine < lines)
+      {
+         uint32_t windows = LineWindows[IPPU.PreviousLine];
+         int32_t end = IPPU.PreviousLine + 1;
+         while (end < lines && LineWindows[end] == windows)
+            end++;
+         if (windows != RenderWindows)
+         {
+            RenderWindows = windows;
+            PPU.RecomputeClipWindows = true;
+         }
+         S9xUpdateScreenTo(end);
+      }
 
       __atomic_store_n(&rendered, pub, __ATOMIC_RELEASE);
    }

@@ -300,10 +300,18 @@ void S9xStartScreenRefresh(void)
       IPPU.FrameCount = 0;
 }
 
+#ifdef SNES_RENDER_MT
+uint32_t LineWindows[240];
+uint32_t RenderWindows;
+#endif
+
 void RenderLine(uint8_t C)
 {
    if (IPPU.RenderThisFrame)
    {
+#ifdef SNES_RENDER_MT
+      LineWindows[C] = PPU.Window1Left | (PPU.Window1Right << 8) | (PPU.Window2Left << 16) | ((uint32_t)PPU.Window2Right << 24);
+#endif
       LineData[C].BG[0].VOffset = PPU.BG[0].VOffset + 1;
       LineData[C].BG[0].HOffset = PPU.BG[0].HOffset;
       LineData[C].BG[1].VOffset = PPU.BG[1].VOffset + 1;
@@ -3118,4 +3126,7 @@ void S9xUpdateScreenTo(int32_t lines)
 
    IPPU.PreviousLine = lines;
    PROF_END(snes_prof_render_cycles);
+#ifdef RG_SNES_PROFILING
+   snes_prof_render_calls++;
+#endif
 }
