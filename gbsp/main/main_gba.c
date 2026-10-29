@@ -10,7 +10,7 @@
 #define GBA_SCREEN_WIDTH    240
 #define GBA_SCREEN_HEIGHT   160
 #define GBA_SOUND_FREQUENCY 65536 // 64 * 1024 Hz
-#define GBA_ROM_BUFFER_MIB  8     // Larger ROMs are paged in from the SD card
+#define GBA_ROM_BUFFER_MIB  16    // Larger ROMs are paged in from the SD card, stalling the frame
 
 #define SRAM_CHECK_INTERVAL 600   // Frames between battery save dirty checks (~10s)
 #define JIT_UPKEEP_SLACK_US 4000  // Only do JIT housekeeping when the frame has this much time left
