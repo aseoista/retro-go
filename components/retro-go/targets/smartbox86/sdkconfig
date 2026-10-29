@@ -32,9 +32,23 @@ CONFIG_SPIRAM_XIP_FROM_PSRAM=y
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 
 #
+# Cache — code runs XIP from PSRAM and every emulator keeps its hot data there,
+# so trade 128 KB of internal RAM for a bigger L2 (default is 128 KB)
+#
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+#
 # Stack
 #
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+
+#
+# Watchdog — like every other target: the emulator loop owns core 0 and never yields
+# when running below full speed, and the task WDT's ISR backtrace print over USB
+# serial then trips the interrupt WDT (panic + reboot).
+#
+CONFIG_ESP_TASK_WDT_INIT=n
 
 #
 # Compiler
