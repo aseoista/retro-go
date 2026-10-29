@@ -446,25 +446,37 @@ static INLINE void REGISTER_2122(uint8_t Byte)
    {
       if ((Byte & 0x7f) != (PPU.CGDATA[PPU.CGADD] >> 8))
       {
+#ifndef SNES_RENDER_MT
          FLUSH_REDRAW();
+#endif
          PPU.CGDATA[PPU.CGADD] &= 0x00FF;
          PPU.CGDATA[PPU.CGADD] |= (Byte & 0x7f) << 8;
          IPPU.ColorsChanged = true;
          IPPU.Blue [PPU.CGADD] = IPPU.XB [(Byte >> 2) & 0x1f];
          IPPU.Green [PPU.CGADD] = IPPU.XB [(PPU.CGDATA[PPU.CGADD] >> 5) & 0x1f];
+#ifdef SNES_RENDER_MT
+         S9xRenderSetColour(PPU.CGADD, BUILD_PIXEL(IPPU.Red [PPU.CGADD], IPPU.Green [PPU.CGADD], IPPU.Blue [PPU.CGADD]));
+#else
          IPPU.ScreenColors [PPU.CGADD] = (uint16_t) BUILD_PIXEL(IPPU.Red [PPU.CGADD], IPPU.Green [PPU.CGADD], IPPU.Blue [PPU.CGADD]);
+#endif
       }
       PPU.CGADD++;
    }
    else if (Byte != (uint8_t)(PPU.CGDATA[PPU.CGADD] & 0xff))
    {
+#ifndef SNES_RENDER_MT
       FLUSH_REDRAW();
+#endif
       PPU.CGDATA[PPU.CGADD] &= 0x7F00;
       PPU.CGDATA[PPU.CGADD] |= Byte;
       IPPU.ColorsChanged = true;
       IPPU.Red [PPU.CGADD] = IPPU.XB [Byte & 0x1f];
       IPPU.Green [PPU.CGADD] = IPPU.XB [(PPU.CGDATA[PPU.CGADD] >> 5) & 0x1f];
+#ifdef SNES_RENDER_MT
+      S9xRenderSetColour(PPU.CGADD, BUILD_PIXEL(IPPU.Red [PPU.CGADD], IPPU.Green [PPU.CGADD], IPPU.Blue [PPU.CGADD]));
+#else
       IPPU.ScreenColors [PPU.CGADD] = (uint16_t) BUILD_PIXEL(IPPU.Red [PPU.CGADD], IPPU.Green [PPU.CGADD], IPPU.Blue [PPU.CGADD]);
+#endif
    }
    PPU.CGFLIP = !PPU.CGFLIP;
 }

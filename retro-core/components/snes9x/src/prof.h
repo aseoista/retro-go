@@ -7,8 +7,9 @@
  * Uses the CPU cycle counter so hot paths stay cheap to instrument. */
 /* #define RG_SNES_PROFILING */
 
-/* Uncomment to ignore the resume flag and always cold-boot the ROM, so that every run
- * replays the same attract demo (e.g. Super Mario World) as a repeatable benchmark. */
+/* Uncomment to make every boot replay the same frames as a repeatable benchmark: the last
+ * save state is always loaded, or the ROM cold-boots if there is none (e.g. SMW's attract
+ * demo). Don't touch the device while it runs. */
 /* #define RG_SNES_BENCHMARK */
 
 /* Uncomment to log a rolling CRC of every rendered frame once per second (costs ~1 ms per

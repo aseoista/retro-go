@@ -25,6 +25,10 @@ bool S9xRenderThreadInit(void);
 void S9xRenderNewFrame(void);
 void S9xRenderPublish(int32_t lines);
 void S9xRenderSync(void);
+/* CGRAM writes ($2122, often HDMA'd every line for gradients) don't make the CPU core wait
+ * either: the new colour is queued with the line it applies from, and the render task
+ * updates IPPU.ScreenColors right before drawing that line. */
+void S9xRenderSetColour(uint8_t index, uint16_t colour);
 #define RENDER_SYNC() S9xRenderSync()
 #else
 #define RENDER_SYNC() do {} while (0)

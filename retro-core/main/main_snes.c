@@ -402,7 +402,9 @@ void snes_main(void)
 #endif
 
 #ifdef RG_SNES_BENCHMARK
-    RG_LOGW("Benchmark build: ignoring resume flag, cold-booting ROM\n");
+    // Every boot replays the same frames: from the last save state if there is one,
+    // otherwise from power-on (e.g. Super Mario World's attract demo)
+    RG_LOGW("Benchmark build: %s\n", rg_emu_load_state(app->saveSlot) ? "replaying from save state" : "cold-booting ROM");
 #else
     if (app->bootFlags & RG_BOOT_RESUME)
     {
