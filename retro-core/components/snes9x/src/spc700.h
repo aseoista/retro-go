@@ -5,6 +5,8 @@
 #ifndef _SPC700_H_
 #define _SPC700_H_
 
+#include "prof.h"
+
 #define Carry       1
 #define Zero        2
 #define Interrupt   4
@@ -65,12 +67,19 @@ typedef struct
 void IRAM_ATTR APUExecute(void);
 
 #define APU_EXECUTE1() \
-APUExecute();
+{ \
+    PROF_START(); \
+    APUExecute(); \
+    PROF_END(snes_prof_apu_cycles); \
+}
 
 #define APU_EXECUTE() \
-if (IAPU.APUExecuting) \
-    while (APU.Cycles <= CPU.Cycles) \
-      APUExecute();
+if (IAPU.APUExecuting && APU.Cycles <= CPU.Cycles) \
+{ \
+    PROF_START(); \
+    do APUExecute(); while (APU.Cycles <= CPU.Cycles); \
+    PROF_END(snes_prof_apu_cycles); \
+}
 
 #endif
 #endif

@@ -138,6 +138,7 @@ void S9xSetPPU(uint8_t Byte, uint16_t Address)
          PPU.SavedOAMAddr = PPU.OAMAddr;
          if (PPU.OAMPriorityRotation && PPU.FirstSprite != (PPU.OAMAddr >> 1))
          {
+            RENDER_SYNC();
             PPU.FirstSprite = (PPU.OAMAddr & 0xFE) >> 1;
             IPPU.OBJChanged = true;
          }
@@ -150,6 +151,7 @@ void S9xSetPPU(uint8_t Byte, uint16_t Address)
          {
             if (PPU.FirstSprite != (PPU.OAMAddr >> 1))
             {
+               RENDER_SYNC();
                PPU.FirstSprite = (PPU.OAMAddr & 0xFE) >> 1;
                IPPU.OBJChanged = true;
             }
@@ -158,6 +160,7 @@ void S9xSetPPU(uint8_t Byte, uint16_t Address)
          {
             if (PPU.FirstSprite != 0)
             {
+               RENDER_SYNC();
                PPU.FirstSprite = 0;
                IPPU.OBJChanged = true;
             }
@@ -291,10 +294,12 @@ void S9xSetPPU(uint8_t Byte, uint16_t Address)
          IPPU.FirstVRAMRead = true;
          break;
       case 0x2118: /* VRAM write data (low) */
+         RENDER_SYNC();
          IPPU.FirstVRAMRead = true;
          REGISTER_2118(Byte);
          break;
       case 0x2119: /* VRAM write data (high) */
+         RENDER_SYNC();
          IPPU.FirstVRAMRead = true;
          REGISTER_2119(Byte);
          break;
@@ -485,6 +490,7 @@ void S9xSetPPU(uint8_t Byte, uint16_t Address)
       case 0x2133: /* Screen settings */
          if (Byte != Memory.FillRAM [0x2133])
          {
+            RENDER_SYNC(); /* ScreenHeight changes before the flush below */
             if (Byte & 0x04)
             {
                PPU.ScreenHeight = SNES_HEIGHT_EXTENDED;
@@ -671,6 +677,7 @@ uint8_t S9xGetPPU(uint16_t Address)
                PPU.OAMAddr = (PPU.OAMAddr + 1) & 0x1ff;
                if (PPU.OAMPriorityRotation && PPU.FirstSprite != (PPU.OAMAddr >> 1))
                {
+                  RENDER_SYNC();
                   PPU.FirstSprite = (PPU.OAMAddr & 0xfe) >> 1;
                   IPPU.OBJChanged = true;
                }
@@ -686,6 +693,7 @@ uint8_t S9xGetPPU(uint16_t Address)
                ++PPU.OAMAddr;
                if (PPU.OAMPriorityRotation && PPU.FirstSprite != (PPU.OAMAddr >> 1))
                {
+                  RENDER_SYNC();
                   PPU.FirstSprite = (PPU.OAMAddr & 0xfe) >> 1;
                   IPPU.OBJChanged = true;
                }
@@ -1586,6 +1594,8 @@ static void CommonPPUReset()
       IPPU.Blue [c] = ((c >> 6) & 2) << 3;
       PPU.CGDATA [c] = IPPU.Red [c] | (IPPU.Green [c] << 5) | (IPPU.Blue [c] << 10);
    }
+
+   RENDER_SYNC();
 
    PPU.FirstSprite = 0;
    for (Sprite = 0; Sprite < 128; Sprite++)

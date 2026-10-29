@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "render_mt.h"
+
 #define FIRST_VISIBLE_LINE 1
 
 extern uint8_t  GetBank;
@@ -201,6 +203,7 @@ typedef struct
 } SDMA;
 
 void S9xUpdateScreen(void);
+void S9xUpdateScreenTo(int32_t lines);
 void S9xResetPPU(void);
 void S9xSoftResetPPU(void);
 void S9xFixColourBrightness(void);
@@ -242,8 +245,12 @@ bool JustifierOffscreen(void);
 
 static INLINE void FLUSH_REDRAW(void)
 {
+#ifdef SNES_RENDER_MT
+   S9xRenderSync();
+#else
    if (IPPU.PreviousLine != IPPU.CurrentLine)
       S9xUpdateScreen();
+#endif
 }
 
 static INLINE void REGISTER_2104(uint8_t byte)
@@ -279,12 +286,16 @@ static INLINE void REGISTER_2104(uint8_t byte)
          PPU.OAMAddr &= 0x1ff;
          if (PPU.OAMPriorityRotation && PPU.FirstSprite != (PPU.OAMAddr >> 1))
          {
+            RENDER_SYNC();
             PPU.FirstSprite = (PPU.OAMAddr & 0xFE) >> 1;
             IPPU.OBJChanged = true;
          }
       }
       else if (PPU.OAMPriorityRotation && (PPU.OAMAddr & 1))
-         IPPU.OBJChanged = true;
+         {
+            RENDER_SYNC();
+            IPPU.OBJChanged = true;
+         }
    }
    else if (!(PPU.OAMFlip & 1))
    {
@@ -292,7 +303,10 @@ static INLINE void REGISTER_2104(uint8_t byte)
       PPU.OAMWriteRegister |= byte;
       PPU.OAMFlip |= 1;
       if (PPU.OAMPriorityRotation && (PPU.OAMAddr & 1))
-         IPPU.OBJChanged = true;
+         {
+            RENDER_SYNC();
+            IPPU.OBJChanged = true;
+         }
    }
    else
    {
@@ -334,6 +348,7 @@ static INLINE void REGISTER_2104(uint8_t byte)
       ++PPU.OAMAddr;
       if (PPU.OAMPriorityRotation && PPU.FirstSprite != (PPU.OAMAddr >> 1))
       {
+         RENDER_SYNC();
          PPU.FirstSprite = (PPU.OAMAddr & 0xFE) >> 1;
          IPPU.OBJChanged = true;
       }

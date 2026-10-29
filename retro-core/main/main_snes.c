@@ -3,6 +3,10 @@
 #include <snes9x.h>
 #include <math.h>
 
+#ifdef RG_SNES_PROFILING
+#include <esp_heap_caps.h>
+#endif
+
 typedef struct
 {
 	char name[16];
@@ -390,13 +394,21 @@ void snes_main(void)
     S9xSetPlaybackRate(Settings.SoundPlaybackRate);
 #endif
 
+#ifdef RG_SNES_BENCHMARK
+    RG_LOGW("Benchmark build: ignoring resume flag, cold-booting ROM\n");
+#else
     if (app->bootFlags & RG_BOOT_RESUME)
     {
         rg_emu_load_state(app->saveSlot);
     }
+#endif
 
     rg_system_set_tick_rate(Memory.ROMFramesPerSecond);
-    int samplesPerFrame = AUDIO_SAMPLE_RATE / Memory.ROMFramesPerSecond;
+    // The rate isn't a multiple of the frame rate (32000 / 60), so carry the remainder
+    // over instead of truncating it, which made audio-paced emulation run slightly fast.
+    const int samplesPerFrameBase = AUDIO_SAMPLE_RATE / Memory.ROMFramesPerSecond;
+    const int samplesRemainder = AUDIO_SAMPLE_RATE % Memory.ROMFramesPerSecond;
+    int samplesCarry = 0;
 #ifndef RG_TARGET_SMARTBOX86
     app->frameskip = 3;
 #else // RG_TARGET_SMARTBOX86
@@ -408,8 +420,10 @@ void snes_main(void)
     int skipFrames = 0;
 
 #ifdef RG_SNES_PROFILING
-    static int64_t prof_acc_emu, prof_acc_mix, prof_acc_audio, prof_acc_sleep, prof_acc_loop;
-    static int64_t prof_ticks;
+    int64_t prof_emu = 0, prof_disp = 0, prof_mix = 0, prof_audio = 0, prof_busy_max = 0;
+    int64_t prof_window_start = rg_system_timer();
+    int prof_ticks = 0, prof_over = 0;
+    snes_prof_render_cycles = snes_prof_apu_cycles = snes_prof_sync_cycles = 0;
 #endif
 
     while (1)
@@ -445,6 +459,26 @@ void snes_main(void)
         GFX.Screen = currentUpdate->data;
 
         S9xMainLoop();
+
+#ifdef RG_SNES_FRAME_CRC
+        // Per-window video CRC plus a WRAM CRC, to tell rendering from emulation divergence
+        static uint32_t frame_crc, frame_count;
+        for (int y = 0; y < currentUpdate->height; y++)
+            frame_crc = rg_crc32(frame_crc, (uint8_t *)currentUpdate->data + y * currentUpdate->stride, SNES_WIDTH * 2);
+        if (++frame_count % 60 == 0)
+        {
+            RG_LOGI("CRC frame=%u video=%08X wram=%08X\n", (unsigned)frame_count, (unsigned)frame_crc,
+                    (unsigned)rg_crc32(0, Memory.RAM, 0x20000));
+            frame_crc = 0;
+        }
+#endif
+
+        int samplesPerFrame = samplesPerFrameBase;
+        if ((samplesCarry += samplesRemainder) >= Memory.ROMFramesPerSecond)
+        {
+            samplesCarry -= Memory.ROMFramesPerSecond;
+            samplesPerFrame++;
+        }
 #ifdef RG_SNES_PROFILING
         int64_t tB = rg_system_timer();
 #endif
@@ -454,6 +488,9 @@ void snes_main(void)
             slowFrame = !rg_display_sync(false);
             rg_display_submit(currentUpdate, 0);
         }
+#ifdef RG_SNES_PROFILING
+        int64_t tC = rg_system_timer();
+#endif
 
     #ifndef USE_BLARGG_APU
         if (apu_enabled && lowpass_filter)
@@ -461,13 +498,9 @@ void snes_main(void)
         else if (apu_enabled)
             S9xMixSamples((void *)audioBuffer, samplesPerFrame << 1);
     #endif
-        int64_t tC = rg_system_timer();
-
-        rg_system_tick(tC - tA);
-
-#ifdef RG_SNES_PROFILING
         int64_t tD = rg_system_timer();
-#endif
+
+        rg_system_tick(tD - tA);
 
     #ifndef USE_BLARGG_APU
         if (apu_enabled)
@@ -476,20 +509,41 @@ void snes_main(void)
 
 #ifdef RG_SNES_PROFILING
         int64_t tE = rg_system_timer();
+        int64_t busy = tD - tA;
 
-        prof_acc_emu   += tB - tA;
-        prof_acc_mix   += tC - tB;
-        prof_acc_audio += tE - tD;
-        prof_acc_loop  += tE - tA;
+        prof_emu   += tB - tA;
+        prof_disp  += tC - tB;
+        prof_mix   += tD - tC;
+        prof_audio += tE - tD;
+        if (busy > prof_busy_max)
+            prof_busy_max = busy;
+        if (busy > app->frameTime)
+            prof_over++;
 
         if (++prof_ticks >= app->tickRate)
         {
-            RG_LOGI("PROF emu=%d mix=%d audio=%d loop=%d us/tick\n",
-                (int)(prof_acc_emu   / prof_ticks),
-                (int)(prof_acc_mix   / prof_ticks),
-                (int)(prof_acc_audio / prof_ticks),
-                (int)(prof_acc_loop  / prof_ticks));
-            prof_acc_emu = prof_acc_mix = prof_acc_audio = prof_acc_sleep = prof_acc_loop = prof_ticks = 0;
+            const int cyclesPerUs = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+            int render = snes_prof_render_cycles / cyclesPerUs / prof_ticks;
+            int spc = snes_prof_apu_cycles / cyclesPerUs / prof_ticks;
+            int sync = snes_prof_sync_cycles / cyclesPerUs / prof_ticks;
+            int emu = prof_emu / prof_ticks;
+        #ifdef SNES_RENDER_MT
+            int cpu = emu - spc - sync; // ppu runs on the other core
+        #else
+            int cpu = emu - spc - render;
+        #endif
+            RG_LOGI("PROF fps=%.1f emu=%d (cpu=%d ppu=%d spc=%d sync=%d) disp=%d mix=%d audio=%d busy_max=%d over=%d/%d heap_int=%d\n",
+                prof_ticks * 1000000.f / (tE - prof_window_start),
+                emu, cpu, render, spc, sync,
+                (int)(prof_disp / prof_ticks),
+                (int)(prof_mix / prof_ticks),
+                (int)(prof_audio / prof_ticks),
+                (int)prof_busy_max, prof_over, prof_ticks,
+                (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            prof_emu = prof_disp = prof_mix = prof_audio = prof_busy_max = 0;
+            prof_ticks = prof_over = 0;
+            snes_prof_render_cycles = snes_prof_apu_cycles = snes_prof_sync_cycles = 0;
+            prof_window_start = rg_system_timer();
         }
 #endif
 

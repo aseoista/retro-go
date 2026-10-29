@@ -8,6 +8,7 @@
 
 #include "port.h"
 #include "65c816.h"
+#include "prof.h"
 
 #define ROM_NAME_LEN 22
 

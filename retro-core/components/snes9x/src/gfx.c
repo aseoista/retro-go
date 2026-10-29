@@ -162,6 +162,11 @@ bool S9xInitGFX(void)
    if (!LocalState)
       return false;
 
+#ifdef SNES_RENDER_MT
+   if (!S9xRenderThreadInit())
+      return false;
+#endif
+
    GFX.OBJLines = LocalState->OBJLines;
    GFX.RealPitch = GFX.Pitch2 = GFX.Pitch;
    GFX.ZPitch = GFX.Pitch;
@@ -238,7 +243,13 @@ void S9xStartScreenRefresh(void)
 {
    if (IPPU.RenderThisFrame)
    {
+#ifdef SNES_RENDER_MT
+      /* The render task resets PreviousLine itself when it sees the new frame */
+      IPPU.CurrentLine = 0;
+      S9xRenderNewFrame();
+#else
       IPPU.PreviousLine = IPPU.CurrentLine = 0;
+#endif
 
       if (PPU.BGMode == 5 || PPU.BGMode == 6)
          IPPU.Interlace = (Memory.FillRAM[0x2133] & 1);
@@ -324,6 +335,9 @@ void RenderLine(uint8_t C)
          }
       }
       IPPU.CurrentLine = C + 1;
+#ifdef SNES_RENDER_MT
+      S9xRenderPublish(C + 1);
+#endif
    }
    else
    {
@@ -2584,8 +2598,15 @@ static void RenderScreen(uint8_t* Screen, bool sub, bool force_no_add, uint8_t D
 
 void S9xUpdateScreen(void)
 {
+   S9xUpdateScreenTo(IPPU.CurrentLine);
+}
+
+/* Draws lines [IPPU.PreviousLine, lines) with the current PPU state */
+void S9xUpdateScreenTo(int32_t lines)
+{
    int32_t x2 = 1;
    uint32_t starty, endy, black;
+   PROF_START();
 
    GFX.S = GFX.Screen;
    GFX.r2131 = Memory.FillRAM [0x2131];
@@ -2604,7 +2625,7 @@ void S9xUpdateScreen(void)
    }
 
    GFX.StartY = IPPU.PreviousLine;
-   if ((GFX.EndY = IPPU.CurrentLine - 1) >= PPU.ScreenHeight)
+   if ((GFX.EndY = lines - 1) >= PPU.ScreenHeight)
       GFX.EndY = PPU.ScreenHeight - 1;
 
    /* XXX: Check ForceBlank? Or anything else? */
@@ -3095,5 +3116,6 @@ void S9xUpdateScreen(void)
    /* Double the height of the pixels just drawn */
    FIX_INTERLACE(GFX.Screen, false, GFX.ZBuffer);
 
-   IPPU.PreviousLine = IPPU.CurrentLine;
+   IPPU.PreviousLine = lines;
+   PROF_END(snes_prof_render_cycles);
 }

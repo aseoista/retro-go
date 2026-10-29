@@ -28,6 +28,12 @@ CMemory Memory;
 
 uint8_t OpenBus = 0;
 
+#ifdef RG_SNES_PROFILING
+uint32_t snes_prof_render_cycles = 0;
+uint32_t snes_prof_apu_cycles = 0;
+uint32_t snes_prof_sync_cycles = 0;
+#endif
+
 SPPU PPU;
 InternalPPU IPPU;
 
