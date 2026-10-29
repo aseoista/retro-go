@@ -72,7 +72,7 @@ bool S9xLoadState(const char *filename)
    chunks += fread(Memory.FillRAM, FILLRAM_SIZE, 1, fp);
    chunks += fread(&APU, sizeof(APU), 1, fp);
    chunks += fread(&IAPU, sizeof(IAPU), 1, fp);
-   chunks += fread(IAPU.RAM, 0x10000, 1, fp);
+   chunks += fread(IAPU_RAM, 0x10000, 1, fp); /* IAPU.RAM now holds the saving session's pointer */
    chunks += fread(&SoundData, sizeof(SoundData), 1, fp);
 
    printf("Loaded chunks = %d\n", chunks);
