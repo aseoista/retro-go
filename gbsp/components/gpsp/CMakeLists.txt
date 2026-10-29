@@ -82,9 +82,12 @@ target_compile_definitions(${COMPONENT_TARGET} PRIVATE
 
 # ESP32-P4 before rev 3 has no Zba/Zbb/Zbs/Zcb: build the core and generate JIT code without
 # them. Rev 3 parts could enable them all for a few more percent.
+# Its PIE is also the older XespV 2.1, with different encodings: "xesppie" (as IDF uses for
+# these revisions) selects that assembler; "xespv" would emit 2.2 code that traps as an
+# illegal PIE instruction in the affine renderer. The core uses no hardware loops.
 if(CONFIG_ESP32P4_REV_MIN_FULL LESS 300)
     set(GPSP_RV32_ZB 0)
-    set(GPSP_RV32_MARCH "rv32imafc_zicsr_zifencei_xesploop_xespv")
+    set(GPSP_RV32_MARCH "rv32imafc_zicsr_zifencei_xesppie")
 else()
     set(GPSP_RV32_ZB 1)
     set(GPSP_RV32_MARCH "rv32imafc_zicsr_zifencei_zba_zbb_zbs_zcb_xesploop_xespv")
