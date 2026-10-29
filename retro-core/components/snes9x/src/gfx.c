@@ -9,6 +9,15 @@
 #include "gfx.h"
 #include "apu.h"
 
+#ifdef SNES_RENDER_MT
+/* Backdrop (CGRAM 0) of line y while the render task draws with per-line palettes */
+#define LINE_BACKDROP_UPDATE(var, y, widen) if (LinePalettesActive) var = widen(LinePalettes[y][0])
+#else
+#define LINE_BACKDROP_UPDATE(var, y, widen) do {} while (0)
+#endif
+#define BACKDROP16(c) (c)
+#define BACKDROP32(c) ((c) * 0x10001u)
+
 static const uint8_t BitShifts[8][4] =
 {
    {2, 2, 2, 2}, /* 0 */
@@ -756,6 +765,7 @@ static void DrawOBJS(bool OnMain, uint8_t D)
 
    for (Y = GFX.StartY, Offset = Y * GFX.PPL; Y <= GFX.EndY; Y++, Offset += GFX.PPL)
    {
+      RENDER_TILE_Y(Y);
       int32_t I = 0;
       int32_t tiles = GFX.OBJLines[Y].Tiles;
       int32_t S;
@@ -1117,6 +1127,7 @@ static void DrawBackgroundOffset(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8
 
    for (Y = GFX.StartY; Y <= GFX.EndY; Y++)
    {
+      RENDER_TILE_Y(Y);
       uint32_t VOff = LineData [Y].BG[2].VOffset - 1;
       uint32_t HOff = LineData [Y].BG[2].HOffset;
       int32_t VirtAlign;
@@ -1675,6 +1686,7 @@ static void DrawBackground(uint32_t BGMode, uint32_t bg, uint8_t Z1, uint8_t Z2)
 
    for (Y = GFX.StartY; Y <= GFX.EndY; Y += Lines)
    {
+      RENDER_TILE_Y(Y);
       uint32_t ScreenLine;
       uint32_t t1;
       uint32_t t2;
@@ -2829,6 +2841,7 @@ void S9xUpdateScreenTo(int32_t lines)
          pClip = &IPPU.Clip [0];
          for (y = starty; y <= endy; y++)
          {
+            LINE_BACKDROP_UPDATE(back, y, BACKDROP16);
             uint32_t b;
             if (!(Count = pClip->Count [5]))
             {
@@ -3009,6 +3022,7 @@ void S9xUpdateScreenTo(int32_t lines)
          {
             for (y = starty; y <= endy; y++)
             {
+               LINE_BACKDROP_UPDATE(back, y, BACKDROP32);
                uint32_t b;
                for (b = 0; b < pClip->Count [5]; b++)
                {
@@ -3033,6 +3047,7 @@ void S9xUpdateScreenTo(int32_t lines)
          {
             for (y = starty; y <= endy; y++)
             {
+               LINE_BACKDROP_UPDATE(back, y, BACKDROP32);
                uint16_t* p = (uint16_t*)(GFX.Screen + y * GFX.Pitch2);
                uint8_t* d = GFX.ZBuffer + y * GFX.ZPitch;
                uint8_t* e = d + 256 * x2;
@@ -3063,6 +3078,7 @@ void S9xUpdateScreenTo(int32_t lines)
          uint32_t y;
          for (y = starty; y <= endy; y++)
          {
+            if (!PPU.ForcedBlanking) LINE_BACKDROP_UPDATE(back, y, BACKDROP32);
             uint32_t c;
             uint32_t* p = (uint32_t*)(GFX.Screen + y * GFX.Pitch2);
             uint32_t* q = (uint32_t*)((uint16_t*) p + IPPU.RenderedScreenWidth);
@@ -3089,6 +3105,7 @@ void S9xUpdateScreenTo(int32_t lines)
          uint32_t y;
          for (y = starty; y <= endy; y++)
          {
+            if (!PPU.ForcedBlanking) LINE_BACKDROP_UPDATE(back, y, BACKDROP32);
             uint32_t* p = (uint32_t*)(GFX.Screen + y * GFX.Pitch2);
             uint32_t* q = (uint32_t*)((uint16_t*) p + IPPU.RenderedScreenWidth);
             while (p < q)

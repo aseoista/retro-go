@@ -782,6 +782,7 @@ void DrawTile16Add(uint32_t Tile, int32_t Offset, uint32_t StartLine, uint32_t L
       bp = pCache + StartLine;
       for (l = LineCount; l != 0; l--, bp += 8, Screen += GFX.PPL, Depth += GFX.PPL, SubDepth += GFX.PPL)
       {
+         TILE_LINE_COLORS();
          uint8_t N;
          for (N = 0; N < 8; N++)
          {
@@ -808,6 +809,7 @@ void DrawTile16Add(uint32_t Tile, int32_t Offset, uint32_t StartLine, uint32_t L
       bp = pCache + StartLine;
       for (l = LineCount; l != 0; l--, bp += 8, Screen += GFX.PPL, Depth += GFX.PPL, SubDepth += GFX.PPL)
       {
+         TILE_LINE_COLORS();
          uint8_t N;
          for (N = 0; N < 8; N++)
          {
@@ -834,6 +836,7 @@ void DrawTile16Add(uint32_t Tile, int32_t Offset, uint32_t StartLine, uint32_t L
       bp = pCache + 56 - StartLine;
       for (l = LineCount; l != 0; l--, bp -= 8, Screen += GFX.PPL, Depth += GFX.PPL, SubDepth += GFX.PPL)
       {
+         TILE_LINE_COLORS();
          uint8_t N;
          for (N = 0; N < 8; N++)
          {
@@ -860,6 +863,7 @@ void DrawTile16Add(uint32_t Tile, int32_t Offset, uint32_t StartLine, uint32_t L
       bp = pCache + 56 - StartLine;
       for (l = LineCount; l != 0; l--, bp -= 8, Screen += GFX.PPL, Depth += GFX.PPL, SubDepth += GFX.PPL)
       {
+         TILE_LINE_COLORS();
          uint8_t N;
          for (N = 0; N < 8; N++)
          {

@@ -21,6 +21,17 @@
 extern uint32_t LineWindows[240];
 extern uint32_t RenderWindows;
 
+/* Palette changes queued mid-run (see S9xRenderSetColour) don't split the render task's
+ * work either: while LinePalettesActive, LinePalettes[y] is the palette for screen line y
+ * and the tile/backdrop renderers look it up per line, so BG tiles keep being drawn in
+ * strips of up to 8 lines (Donkey Kong Country changes colours every few lines). */
+extern uint16_t *LinePalettes[240];
+extern bool LinePalettesActive;
+/* First screen line of the tiles being drawn, set by the BG/OBJ row loops: a tile's line
+ * can't be derived from its screen offset since x can be negative (clipped/off-screen). */
+extern int32_t RenderTileY;
+#define RENDER_TILE_Y(y) (RenderTileY = (y))
+
 bool S9xRenderThreadInit(void);
 void S9xRenderNewFrame(void);
 void S9xRenderPublish(int32_t lines);
@@ -32,6 +43,7 @@ void S9xRenderSetColour(uint8_t index, uint16_t colour);
 #define RENDER_SYNC() S9xRenderSync()
 #else
 #define RENDER_SYNC() do {} while (0)
+#define RENDER_TILE_Y(y) do {} while (0)
 #endif
 
 #endif

@@ -8,6 +8,7 @@
  * so this file is the only one that sees both. */
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <string.h>
 
 #include "snes9x.h"
 #include "ppu.h"
@@ -34,14 +35,32 @@ static struct
 } colour_queue[COLOUR_QUEUE_SIZE];
 static uint32_t colour_head, colour_tail;
 
-/* Applies queued colours that take effect at or before `line` */
-static void apply_colours(int32_t line)
+/* Snapshots for palettes that change mid-run, owned by the render task. A run only gets
+ * split when they run out. */
+#define PALETTE_POOL_SIZE 32
+static uint16_t palette_pool[PALETTE_POOL_SIZE][256];
+uint16_t *LinePalettes[240];
+bool LinePalettesActive;
+int32_t RenderTileY;
+
+/* Modes whose renderers don't look palettes up per line (Mode 7, hires, interlace, mosaic) */
+static bool line_palettes_supported(void)
+{
+   if (PPU.BGMode >= 5 || IPPU.Interlace || IPPU.DoubleWidthPixels || IPPU.DoubleHeightPixels)
+      return false;
+   if (PPU.Mosaic > 1 && (PPU.BGMosaic[0] || PPU.BGMosaic[1] || PPU.BGMosaic[2] || PPU.BGMosaic[3]))
+      return false;
+   return true;
+}
+
+/* Applies queued colours that take effect at or before `line` to `palette` */
+static void apply_colours(uint16_t *palette, int32_t line)
 {
    uint32_t head = __atomic_load_n(&colour_head, __ATOMIC_ACQUIRE);
    uint32_t tail = colour_tail;
    while (tail != head && colour_queue[tail % COLOUR_QUEUE_SIZE].line <= line)
    {
-      IPPU.ScreenColors[colour_queue[tail % COLOUR_QUEUE_SIZE].index] = colour_queue[tail % COLOUR_QUEUE_SIZE].colour;
+      palette[colour_queue[tail % COLOUR_QUEUE_SIZE].index] = colour_queue[tail % COLOUR_QUEUE_SIZE].colour;
       tail++;
    }
    __atomic_store_n(&colour_tail, tail, __ATOMIC_RELEASE);
@@ -79,22 +98,46 @@ static void render_task_func(void *arg)
          IPPU.PreviousLine = 0;
       }
 
-      /* Draw in runs of lines that share the same window positions and palette */
+      /* Draw in runs of lines that share the same window positions. Palette changes within
+       * a run get a snapshot per line where they apply (LinePalettes). */
       int32_t lines = pub & 0xFFFF;
       while (IPPU.PreviousLine < lines)
       {
-         apply_colours(IPPU.PreviousLine);
-         int32_t colour_line = next_colour_line();
-         uint32_t windows = LineWindows[IPPU.PreviousLine];
-         int32_t end = IPPU.PreviousLine + 1;
-         while (end < lines && end < colour_line && LineWindows[end] == windows)
-            end++;
+         int32_t start = IPPU.PreviousLine;
+         apply_colours(IPPU.ScreenColors, start);
+
+         uint32_t windows = LineWindows[start];
+         bool per_line = line_palettes_supported();
+         uint16_t *palette = IPPU.ScreenColors;
+         int32_t used = 0, end = start + 1;
+         LinePalettes[start] = palette;
+         while (end < lines && LineWindows[end] == windows)
+         {
+            if (next_colour_line() <= end)
+            {
+               if (!per_line || used == PALETTE_POOL_SIZE)
+                  break;
+               memcpy(palette_pool[used], palette, sizeof(palette_pool[0]));
+               palette = palette_pool[used++];
+               apply_colours(palette, end);
+            }
+            LinePalettes[end++] = palette;
+         }
+
          if (windows != RenderWindows)
          {
             RenderWindows = windows;
             PPU.RecomputeClipWindows = true;
          }
+
+         LinePalettesActive = used > 0;
          S9xUpdateScreenTo(end);
+         if (used > 0)
+         {
+            /* The run's last palette is the current one */
+            memcpy(IPPU.ScreenColors, palette, sizeof(palette_pool[0]));
+            LinePalettesActive = false;
+         }
       }
 
       __atomic_store_n(&rendered, pub, __ATOMIC_RELEASE);
@@ -138,7 +181,7 @@ void S9xRenderSync(void)
    if (__atomic_load_n(&rendered, __ATOMIC_ACQUIRE) == pub)
    {
       /* Whatever the caller changes next must not be undone by older queued colours */
-      apply_colours(INT32_MAX);
+      apply_colours(IPPU.ScreenColors, INT32_MAX);
       return;
    }
 
@@ -147,7 +190,7 @@ void S9xRenderSync(void)
    while (__atomic_load_n(&rendered, __ATOMIC_ACQUIRE) != pub)
       ;
    PROF_END(snes_prof_sync_cycles);
-   apply_colours(INT32_MAX);
+   apply_colours(IPPU.ScreenColors, INT32_MAX);
 }
 
 void S9xRenderSetColour(uint8_t index, uint16_t colour)
@@ -155,7 +198,7 @@ void S9xRenderSetColour(uint8_t index, uint16_t colour)
    /* Render task idle: no line can see the change early, write it straight away */
    if (__atomic_load_n(&rendered, __ATOMIC_ACQUIRE) == published)
    {
-      apply_colours(INT32_MAX);
+      apply_colours(IPPU.ScreenColors, INT32_MAX);
       IPPU.ScreenColors[index] = colour;
       return;
    }

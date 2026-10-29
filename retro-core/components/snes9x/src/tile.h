@@ -3,12 +3,33 @@
 #ifndef _TILE_H_
 #define _TILE_H_
 
+#ifdef SNES_RENDER_MT
+/* PalOffset is the tile's palette offset in LinePalettes[PalLine], or -1 when the
+ * palette is the same for all lines (ScreenColors then stays as computed). */
+#define TILE_LINE_PALETTE_VARS() \
+    int32_t PalOffset = -1, PalLine = 0
+#define TILE_LINE_PALETTE_SETUP() \
+    if (LinePalettesActive && !BG.DirectColourMode) \
+    { \
+       PalOffset = ScreenColors - IPPU.ScreenColors; \
+       PalLine = RenderTileY; \
+    }
+#define TILE_LINE_COLORS() \
+    if (PalOffset >= 0) \
+       ScreenColors = LinePalettes[PalLine++] + PalOffset
+#else
+#define TILE_LINE_PALETTE_VARS() do {} while (0)
+#define TILE_LINE_PALETTE_SETUP() do {} while (0)
+#define TILE_LINE_COLORS() do {} while (0)
+#endif
+
 #define TILE_PREAMBLE_VARS() \
     uint32_t l; \
     uint16_t *ScreenColors; \
     uint8_t *pCache; \
     uint32_t TileNumber; \
-    uint32_t TileAddr
+    uint32_t TileAddr; \
+    TILE_LINE_PALETTE_VARS()
 
 #define TILE_PREAMBLE_CODE() \
     TileAddr = BG.TileAddress + ((Tile & 0x3ff) << BG.TileShift); \
@@ -26,7 +47,8 @@
     if (BG.DirectColourMode) \
        ScreenColors = &IPPU.DirectColors [((Tile >> 10) & BG.PaletteMask) << 8]; \
     else \
-       ScreenColors = &IPPU.ScreenColors [(((Tile >> 10) & BG.PaletteMask) << BG.PaletteShift) + BG.StartPalette]
+       ScreenColors = &IPPU.ScreenColors [(((Tile >> 10) & BG.PaletteMask) << BG.PaletteShift) + BG.StartPalette]; \
+    TILE_LINE_PALETTE_SETUP()
 
 #define RENDER_TILE(NORMAL, FLIPPED, N) \
     switch (Tile & (V_FLIP | H_FLIP)) \
@@ -35,6 +57,7 @@
        bp = pCache + StartLine; \
        for (l = LineCount; l != 0; l--, bp += 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           NORMAL (Offset, bp, ScreenColors); \
           NORMAL (Offset + N, bp + 4, ScreenColors); \
        } \
@@ -43,6 +66,7 @@
        bp = pCache + StartLine; \
        for (l = LineCount; l != 0; l--, bp += 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           FLIPPED (Offset, bp + 4, ScreenColors); \
           FLIPPED (Offset + N, bp, ScreenColors); \
        } \
@@ -51,6 +75,7 @@
        bp = pCache + 56 - StartLine; \
        for (l = LineCount; l != 0; l--, bp -= 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           FLIPPED (Offset, bp + 4, ScreenColors); \
           FLIPPED (Offset + N, bp, ScreenColors); \
        } \
@@ -59,6 +84,7 @@
        bp = pCache + 56 - StartLine; \
        for (l = LineCount; l != 0; l--, bp -= 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           NORMAL (Offset, bp, ScreenColors); \
           NORMAL (Offset + N, bp + 4, ScreenColors); \
        } \
@@ -101,6 +127,7 @@
        bp = pCache + StartLine; \
        for (l = LineCount; l != 0; l--, bp += 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           /* This is perfectly OK, regardless of endianness. The tiles are \
            * cached in leftmost-endian order (when not horiz flipped) by \
            * the ConvertTile function. */ \
@@ -116,6 +143,7 @@
        SWAP_DWORD (d2); \
        for (l = LineCount; l != 0; l--, bp += 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           if ((dd = *(uint32_t *) (bp + 4) & d1)) \
              FLIPPED (Offset, (uint8_t *) &dd, ScreenColors); \
           if ((dd = *(uint32_t *) bp & d2)) \
@@ -128,6 +156,7 @@
        SWAP_DWORD (d2); \
        for (l = LineCount; l != 0; l--, bp -= 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           if ((dd = *(uint32_t *) (bp + 4) & d1)) \
              FLIPPED (Offset, (uint8_t *) &dd, ScreenColors); \
           if ((dd = *(uint32_t *) bp & d2)) \
@@ -138,6 +167,7 @@
        bp = pCache + 56 - StartLine; \
        for (l = LineCount; l != 0; l--, bp -= 8, Offset += GFX.PPL) \
        { \
+          TILE_LINE_COLORS(); \
           if ((dd = (*(uint32_t *) bp) & d1)) \
              NORMAL (Offset, (uint8_t *) &dd, ScreenColors); \
           if ((dd = (*(uint32_t *) (bp + 4)) & d2)) \
