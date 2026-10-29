@@ -138,7 +138,7 @@ static void Sanitize(char* str, size_t bufsize)
 bool S9xInitMemory(void)
 {
    Memory.RAM   = (uint8_t*)malloc(RAM_SIZE);
-   Memory.SRAM  = (uint8_t*)malloc(SRAM_SIZE);
+   Memory.SRAM  = (uint8_t*)calloc(1, SRAM_SIZE); /* Games read garbage as save data otherwise */
    Memory.VRAM  = (uint8_t*)malloc(VRAM_SIZE);
    Memory.FillRAM = (uint8_t*)malloc(0x8000);
 
