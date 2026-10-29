@@ -298,7 +298,7 @@ void nes_main(void)
 
         rg_audio_submit((void*)nes->apu->buffer, nes->apu->samples_per_frame);
 
-        if (skipFrames == 0)
+        if (skipFrames == 0 && (RG_ENABLE_FRAMESKIP || nsfPlayer))
         {
             int frameTime = 1000000 / (nes->refresh_rate * app->speed);
             int elapsed = rg_system_timer() - startTime;

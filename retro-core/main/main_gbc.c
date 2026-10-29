@@ -375,7 +375,7 @@ void gbc_main(void)
         // Tick before submitting audio/syncing
         rg_system_tick(rg_system_timer() - startTime - audio_time);
 
-        if (skipFrames == 0)
+        if (skipFrames == 0 && RG_ENABLE_FRAMESKIP)
         {
             int elapsed = rg_system_timer() - startTime;
             if (app->frameskip > 0)

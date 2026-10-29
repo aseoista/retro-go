@@ -266,7 +266,7 @@ void sms_main(void)
         rg_audio_submit(mixbuffer, sample_count);
 
         // See if we need to skip a frame to keep up
-        if (skipFrames == 0)
+        if (skipFrames == 0 && RG_ENABLE_FRAMESKIP)
         {
             int elapsed = rg_system_timer() - startTime;
             if (app->frameskip > 0)

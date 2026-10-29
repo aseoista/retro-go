@@ -403,7 +403,7 @@ void app_main(void)
             rg_audio_submit((void *)gwenesis_ym2612_buffer, AUDIO_BUFFER_LENGTH >> 1);
         }
 
-        if (skipFrames == 0)
+        if (skipFrames == 0 && RG_ENABLE_FRAMESKIP)
         {
             int elapsed = rg_system_timer() - startTime;
             if (app->frameskip > 0)

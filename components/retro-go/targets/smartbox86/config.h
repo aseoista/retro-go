@@ -10,6 +10,8 @@
 // With double-buffering each back-buffer is 2 frames old — disable to ensure
 // every row is redrawn before lcd_sync() flips the buffer.
 #define RG_SCREEN_PARTIAL_UPDATES  0
+// The P4 runs every core at full speed; always render every frame.
+#define RG_ENABLE_FRAMESKIP        0
 
 // --- Audio (Phase 5: ES8311 codec via I2S + I2C) ---
 // No internal DAC on ESP32-P4; use ES8311 codec chip via I2S.

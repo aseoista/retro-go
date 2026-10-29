@@ -493,7 +493,7 @@ void snes_main(void)
         }
 #endif
 
-        if (skipFrames == 0)
+        if (skipFrames == 0 && RG_ENABLE_FRAMESKIP)
         {
             int elapsed = (int)(rg_system_timer() - tA);
             if (app->frameskip > 0)

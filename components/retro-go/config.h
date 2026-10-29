@@ -149,6 +149,11 @@
 #endif
 #endif
 
+// Let emulators skip rendering frames to keep up (fixed app->frameskip, auto frameskip, slow frames)
+#ifndef RG_ENABLE_FRAMESKIP
+#define RG_ENABLE_FRAMESKIP 1
+#endif
+
 #ifndef RG_ZIP_SUPPORT
 #define RG_ZIP_SUPPORT 1
 #endif

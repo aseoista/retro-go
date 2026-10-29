@@ -62,7 +62,7 @@ void osd_vsync(void)
     }
 
     // See if we need to skip a frame to keep up
-    if (skipFrames == 0)
+    if (skipFrames == 0 && RG_ENABLE_FRAMESKIP)
     {
         if (app->frameskip > 0)
             skipFrames = app->frameskip;
