@@ -12,6 +12,9 @@
 #define SDCARD_DO_TRANSACTION sdspi_host_do_transaction
 #elif defined(RG_STORAGE_SDMMC_HOST)
 #include <driver/sdmmc_host.h>
+#ifdef RG_STORAGE_SDMMC_LDO_CHAN
+#include <esp_ldo_regulator.h>
+#endif
 #define SDCARD_DO_TRANSACTION sdmmc_host_do_transaction
 #endif
 
@@ -119,6 +122,17 @@ void rg_storage_init(void)
 #elif defined(RG_STORAGE_SDMMC_HOST)
 
     RG_LOGI("Looking for SD Card using SDMMC...");
+
+#ifdef RG_STORAGE_SDMMC_LDO_CHAN
+    // The card's IO pins are powered by an on-chip LDO. Nothing else turns it on before us
+    // after a power-on reset (a software reset keeps it from the previous boot), so the card
+    // would not answer. Same voltage, non-adjustable: other users of the rail can share it.
+    static esp_ldo_channel_handle_t sd_ldo = NULL;
+    esp_ldo_channel_config_t ldo_config = {.chan_id = RG_STORAGE_SDMMC_LDO_CHAN, .voltage_mv = RG_STORAGE_SDMMC_LDO_MV};
+    if (!sd_ldo && esp_ldo_acquire_channel(&ldo_config, &sd_ldo) != ESP_OK)
+        RG_LOGW("SD Card LDO init failed");
+    rg_task_delay(10); // Let the rail and the card power up
+#endif
 
     sdmmc_host_t host_config = SDMMC_HOST_DEFAULT();
     // SDMMC_HOST_FLAG_DEINIT_ARG must be kept (selects deinit_p over deinit in IDF 5.x).

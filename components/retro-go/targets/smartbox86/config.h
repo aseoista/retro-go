@@ -132,6 +132,10 @@
 // 4-bit mode is required so the driver drives D3 (GPIO42) HIGH before card init;
 // in 1-bit mode the driver skips D3 entirely, and the card may stay in SPI mode.
 #define RG_STORAGE_SDMMC_4BIT
+// The Slot 0 IO pins are supplied by on-chip LDO_VO4 (3.3 V, shared with the display IOVCC).
+// Without enabling it first, the card doesn't answer after a power-on reset.
+#define RG_STORAGE_SDMMC_LDO_CHAN 4
+#define RG_STORAGE_SDMMC_LDO_MV   3300
 
 // --- Battery / power (USB-C board, no battery) ---
 #define RG_BATTERY_DRIVER 0
