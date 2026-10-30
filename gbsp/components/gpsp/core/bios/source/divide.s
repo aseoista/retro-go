@@ -45,6 +45,22 @@ swi_Div:
 	// Gets set if sign(numerator) != sign(denominator)
 	eor sign_flip, numerator_signed, denominator_signed
 
+	// Division by zero: the official BIOS returns when |numerator| <= 1,
+	// with r0 = sign(numerator), r1 = numerator, r3 = 1, and loops forever
+	// otherwise. Games do divide 0 by 0 (e.g. Duel Masters: Sempai Legends'
+	// music fade), so only hang where the hardware does.
+	cmp denominator, #0
+	bne 2f
+	cmp numerator, #1
+	bhi 2f
+	mov result_abs, #1
+	tst sign_flip, #0x80000000
+	mov remainder, numerator
+	rsbne remainder, remainder, #0
+	mov result, #1
+	rsbne result, result, #0
+	bx lr
+ 2:
 	mov accumulator, #0
 	mov current_bit, #1
 

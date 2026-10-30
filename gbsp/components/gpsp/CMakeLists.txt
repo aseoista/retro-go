@@ -61,6 +61,10 @@ set(COMPONENT_PRIV_INCLUDEDIRS "core" "core/libretro")
 set(COMPONENT_ADD_LDFRAGMENTS "gpsp.lf")
 register_component()
 
+# The assembler's dependency scan doesn't see .incbin, so rebuild the BIOS blob when it changes.
+set_source_files_properties(core/bios_data.S PROPERTIES
+    OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/core/bios/open_gba_bios.bin)
+
 # JIT code cache limits (KiB, PSRAM) and the ROM buffer limit (MiB) used by the frontend.
 set(GPSP_RV32_ROM_CACHE_KIB 2048)
 set(GPSP_RV32_RAM_CACHE_KIB 2048)
