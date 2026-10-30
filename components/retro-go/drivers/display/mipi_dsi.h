@@ -26,7 +26,11 @@
 #define MIPI_H              720
 #define MIPI_STRIDE         (MIPI_W * 3)       // bytes per row (BGR888)
 #define MIPI_FRAME_BYTES    ((size_t)MIPI_STRIDE * MIPI_H)
-#define MIPI_NUM_FB         1                  // single-buffered (avoids per-rect flip corruption)
+#define MIPI_NUM_FB         2                  // double-buffered: PPA renders off-screen, DPI
+                                               // flips at vsync (tear-free). Partial CPU writes
+                                               // (border/GUI) are mirrored into both buffers so
+                                               // a flip never drops them. Set to 1 to revert to
+                                               // the old single-buffer behaviour.
 
 #define LCD_BCKL_GPIO       GPIO_NUM_26        // PWM backlight
 #define LCD_RST_GPIO        GPIO_NUM_27        // panel reset (active-low)
@@ -38,6 +42,12 @@
 // ─── State ───────────────────────────────────────────────────────────────────
 static esp_lcd_panel_handle_t s_panel   = NULL;
 static uint8_t               *s_fb[MIPI_NUM_FB];
+
+// Double-buffering: s_disp_idx is scanned out by the DPI engine; s_draw_idx is the off-screen
+// buffer the PPA renders the next gameplay frame into. With MIPI_NUM_FB==1 both stay 0.
+static int s_disp_idx = 0;
+static int s_draw_idx = (MIPI_NUM_FB > 1) ? 1 : 0;
+static int s_pending_fb = -1;   // back buffer awaiting a vsync flip (set by lcd_submit_surface)
 
 // Current write window (set by lcd_set_window)
 static int s_win_x = 0, s_win_y = 0, s_win_w = 0;
@@ -148,17 +158,23 @@ static void lcd_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel));
 
-    // Grab the single DMA framebuffer allocated by the DPI engine
+    // Grab the DMA framebuffer(s) allocated by the DPI engine
+#if MIPI_NUM_FB >= 2
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(
+        s_panel, MIPI_NUM_FB, (void **)&s_fb[0], (void **)&s_fb[1]));
+#else
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(
         s_panel, MIPI_NUM_FB, (void **)&s_fb[0]));
+#endif
 
-    // Clear to black before enabling the display
-    memset(s_fb[0], 0, MIPI_FRAME_BYTES);
+    // Clear every framebuffer to black before enabling the display
+    for (int i = 0; i < MIPI_NUM_FB; i++)
+        memset(s_fb[i], 0, MIPI_FRAME_BYTES);
 
     esp_lcd_panel_disp_on_off(s_panel, true);
 
-    // Start continuous DMA scan from s_fb[0]; all subsequent writes are immediately visible.
-    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[0]);
+    // Start continuous DMA scan from the displayed buffer.
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[s_disp_idx]);
 
     // Conversion scratch buffer — sized to hold one full lcd_buffer worth of pixels
     size_t initial_pixels = (size_t)MIPI_W * 4; // matches LCD_BUFFER_LENGTH
@@ -219,11 +235,15 @@ static inline void lcd_send_buffer(uint16_t *buf, size_t length)
     if (rows <= 0)
         return;
 
-    uint8_t *fb = s_fb[0];
-
     for (int r = 0; r < rows && s_write_y < MIPI_H; r++, s_write_y++) {
         const uint16_t *src = buf + (size_t)r * s_win_w;
-        uint8_t *dst        = fb + (size_t)s_write_y * MIPI_STRIDE + s_win_x * 3;
+        size_t row_off      = (size_t)s_write_y * MIPI_STRIDE + s_win_x * 3;
+        uint8_t *dst0       = s_fb[0] + row_off;
+#if MIPI_NUM_FB >= 2
+        // Mirror partial CPU writes (border/GUI) into both buffers so a later gameplay flip
+        // never reveals stale pixels outside the PPA-rendered viewport.
+        uint8_t *dst1       = s_fb[1] + row_off;
+#endif
 
         for (int x = 0; x < s_win_w; x++) {
             // RGB565-BE → LE (R in bits 15-11) → expand to BGR888
@@ -232,20 +252,35 @@ static inline void lcd_send_buffer(uint16_t *buf, size_t length)
             uint8_t r5 = (uint8_t)((p >> 11) & 0x1F);
             uint8_t g6 = (uint8_t)((p >>  5) & 0x3F);
             uint8_t b5 = (uint8_t)( p        & 0x1F);
-            dst[0] = (b5 << 3) | (b5 >> 2);  // B
-            dst[1] = (g6 << 2) | (g6 >> 4);  // G
-            dst[2] = (r5 << 3) | (r5 >> 2);  // R
-            dst += 3;
+            uint8_t b  = (b5 << 3) | (b5 >> 2);
+            uint8_t g  = (g6 << 2) | (g6 >> 4);
+            uint8_t rr = (r5 << 3) | (r5 >> 2);
+            dst0[0] = b; dst0[1] = g; dst0[2] = rr; dst0 += 3;
+#if MIPI_NUM_FB >= 2
+            dst1[0] = b; dst1[1] = g; dst1[2] = rr; dst1 += 3;
+#endif
         }
     }
 }
 
-// Single-buffer: DPI engine scans s_fb[0] continuously after init.
-// draw_bitmap is called idempotently so the DMA pointer stays valid.
+// The single present per frame. During gameplay a flip is pending: switch the DPI scan to the
+// freshly rendered back buffer at the next vsync (tear-free) and rotate the indices. Otherwise
+// (GUI/menu path, game paused) re-issue the currently displayed buffer — idempotent, and it
+// flushes the CPU write cache so the DPI DMA sees freshly drawn pixels.
 static void lcd_sync(void)
 {
-    if (s_panel)
-        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[0]);
+    if (!s_panel)
+        return;
+#if MIPI_NUM_FB >= 2
+    if (s_pending_fb >= 0) {
+        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[s_pending_fb]);
+        s_disp_idx   = s_pending_fb;
+        s_draw_idx   = s_pending_fb ^ 1;
+        s_pending_fb = -1;
+        return;
+    }
+#endif
+    esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[s_disp_idx]);
 }
 
 static const rg_display_driver_t rg_display_driver_mipi_dsi = {
@@ -411,7 +446,7 @@ static void lcd_submit_surface(const rg_surface_t *surface)
             .srm_cm         = src_cm,
         },
         .out = {
-            .buffer         = s_fb[0],
+            .buffer         = s_fb[s_draw_idx],
             .buffer_size    = MIPI_FRAME_BYTES,
             .pic_w          = MIPI_W,
             .pic_h          = MIPI_H,
@@ -428,4 +463,11 @@ static void lcd_submit_surface(const rg_surface_t *surface)
     };
 
     ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(s_ppa_srm, &srm));
+
+#if MIPI_NUM_FB >= 2
+    // Don't present here — display_task() always calls lcd_sync() right after us, and that is the
+    // single draw_bitmap per frame (issuing a second one would wait on vsync twice → half rate).
+    // Just mark the freshly rendered back buffer as the one to flip to.
+    s_pending_fb = s_draw_idx;
+#endif
 }
