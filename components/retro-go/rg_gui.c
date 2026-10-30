@@ -2040,7 +2040,12 @@ void rg_gui_options_menu(void)
     const rg_gui_option_t game_options[] = {
         {0, _("Scaling"),       "-", RG_DIALOG_FLAG_NORMAL, &scaling_update_cb},
         {0, _("Factor"),        "-", RG_DIALOG_FLAG_HIDDEN, &custom_zoom_cb},
+#ifdef RG_TARGET_SMARTBOX86
+        // PPA hardware scaler always bilinear-filters and ignores DispFilter; hide the dead toggle.
+        {0, _("Filter"),        "-", RG_DIALOG_FLAG_HIDDEN, &filter_update_cb},
+#else
         {0, _("Filter"),        "-", RG_DIALOG_FLAG_NORMAL, &filter_update_cb},
+#endif
         {0, _("Border"),        "-", RG_DIALOG_FLAG_NORMAL, &border_update_cb},
         {0, _("Speed"),         "-", RG_DIALOG_FLAG_NORMAL, &speedup_update_cb},
         // {0, _("Misc options"),  NULL, RG_DIALOG_FLAG_NORMAL, &misc_options_cb},
