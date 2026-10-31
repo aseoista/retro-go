@@ -350,7 +350,9 @@ void snes_main(void)
     apu_enabled = rg_settings_get_number(NS_APP, SETTING_APU_EMULATION, 1);
 
     updates[0] = rg_surface_create(SNES_WIDTH, SNES_HEIGHT_EXTENDED, RG_PIXEL_565_LE, 0);
+    updates[1] = rg_surface_create(SNES_WIDTH, SNES_HEIGHT_EXTENDED, RG_PIXEL_565_LE, 0);
     updates[0]->height = SNES_HEIGHT;
+    updates[1]->height = SNES_HEIGHT;
     currentUpdate = updates[0];
 
     audioBuffer = malloc(AUDIO_BUFFER_LENGTH * sizeof(rg_audio_sample_t));
@@ -497,6 +499,7 @@ void snes_main(void)
         {
             slowFrame = !rg_display_sync(false);
             rg_display_submit(currentUpdate, 0);
+            currentUpdate = updates[currentUpdate == updates[0]];
         }
 #ifdef RG_SNES_PROFILING
         int64_t tC = rg_system_timer();
