@@ -11,6 +11,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_lcd_panel_ops.h"
@@ -19,7 +20,77 @@
 #include "esp_ldo_regulator.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_lcd_st7703.h"
+
+// Uncomment to log, every 120 frames, the panel refresh rate, the PPA scale cost and the per-vsync
+// frame cadence ('1' new frame, '0' repeated frame, '2' a presented frame was never scanned out).
+// The FPS counter only counts submitted frames, so this is how to tell whether motion is smooth.
+// #define MIPI_PACING_PROF
+
+// Vsync: lcd_sync() waits on this so a flip has really happened before the PPA reuses the old
+// front buffer (draw_bitmap only records the new index; the DMA picks it up at its next restart).
+static SemaphoreHandle_t s_vsync_sem = NULL;
+static SemaphoreHandle_t s_sync_lock = NULL;
+static volatile int64_t s_vsync_time = 0;
+
+#ifdef MIPI_PACING_PROF
+static volatile uint32_t s_refresh_count = 0;
+static volatile uint32_t s_present_gen = 0;
+static volatile uint8_t s_vs_delta[256];       // new frames per refresh, ring by refresh count
+static uint32_t s_isr_last_gen = 0;
+
+static inline void IRAM_ATTR pacing_prof_vsync(void)
+{
+    uint32_t g = s_present_gen;
+    uint32_t d = g - s_isr_last_gen;
+    s_isr_last_gen = g;
+    s_vs_delta[s_refresh_count & 255] = d > 9 ? 9 : d;
+    s_refresh_count++;
+}
+
+static void pacing_prof_frame(int64_t ppa_us)
+{
+    static int64_t ppa_acc = 0, win_start = 0;
+    static uint32_t ref0 = 0;
+    static int n = 0;
+    int64_t now = esp_timer_get_time();
+    if (win_start == 0) { win_start = now; ref0 = s_refresh_count; }
+    ppa_acc += ppa_us;
+    if (++n < 120)
+        return;
+    uint32_t rc = s_refresh_count, refs = rc - ref0;
+    char seq[121];
+    int rep = 0, drop = 0;
+    for (int i = 0; i < 120; i++) {
+        int d = s_vs_delta[(rc - 120 + i) & 255];
+        seq[i] = '0' + d;
+        rep += (d == 0);
+        drop += (d > 1) ? d - 1 : 0;
+    }
+    seq[120] = 0;
+    RG_LOGI("PACING panel=%.2fHz submit=%.2ffps ppa=%dus repeats=%d skipped=%d %s\n",
+            refs * 1e6f / (now - win_start), n * 1e6f / (now - win_start), (int)(ppa_acc / n), rep, drop, seq);
+    ppa_acc = 0; n = 0; win_start = now; ref0 = rc;
+}
+#define PACING_PROF_VSYNC()       pacing_prof_vsync()
+#define PACING_PROF_PRESENT()     (s_present_gen++)
+#define PACING_PROF_FRAME(ppa_us) pacing_prof_frame(ppa_us)
+#else
+#define PACING_PROF_VSYNC()
+#define PACING_PROF_PRESENT()
+#define PACING_PROF_FRAME(ppa_us)
+#endif
+
+static bool IRAM_ATTR mipi_on_refresh_done(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
+{
+    PACING_PROF_VSYNC();
+    s_vsync_time = esp_timer_get_time();
+    BaseType_t woken = pdFALSE;
+    if (s_vsync_sem)
+        xSemaphoreGiveFromISR(s_vsync_sem, &woken);
+    return woken == pdTRUE;
+}
 
 // ─── Hardware constants (Waveshare EP44B schematic) ───────────────────────────
 #define MIPI_W              720
@@ -31,6 +102,10 @@
                                                // (border/GUI) are mirrored into both buffers so
                                                // a flip never drops them. Set to 1 to revert to
                                                // the old single-buffer behaviour.
+
+// Vsync events closer than this to a flip may belong to the refresh that was already latched
+// (front porch + sync ≈ 38 lines ≈ 0.8 ms at 60 Hz; doubled for margin).
+#define MIPI_FLIP_GUARD_US  1600
 
 #define LCD_BCKL_GPIO       GPIO_NUM_26        // PWM backlight
 #define LCD_RST_GPIO        GPIO_NUM_27        // panel reset (active-low)
@@ -145,6 +220,8 @@ static void lcd_init(void)
     // PLL_F240M / 6 = 40 MHz. Widen the vertical blanking to get close to 60 Hz content:
     //   H_total = 720+50+20+50 = 840 ; V_total = 720+34+4+34 = 792
     //   40 MHz / (840 * 792) = 60.125 Hz
+    // (Measured 59.63 Hz on most boots, cause unknown; the ES8311 driver's rate control absorbs
+    // whatever the difference to the emulated rate is, since the panel paces emulation.)
     dpi_cfg.video_timing.vsync_back_porch  = 34;
     dpi_cfg.video_timing.vsync_front_porch = 34;
 
@@ -181,6 +258,12 @@ static void lcd_init(void)
 
     // Start continuous DMA scan from the displayed buffer.
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[s_disp_idx]);
+
+    // Vsync events pace the flips in lcd_sync()
+    s_vsync_sem = xSemaphoreCreateBinary();
+    s_sync_lock = xSemaphoreCreateMutex();
+    esp_lcd_dpi_panel_event_callbacks_t cbs = {.on_refresh_done = mipi_on_refresh_done};
+    esp_lcd_dpi_panel_register_event_callbacks(s_panel, &cbs, NULL);
 
     // Conversion scratch buffer — sized to hold one full lcd_buffer worth of pixels
     size_t initial_pixels = (size_t)MIPI_W * 4; // matches LCD_BUFFER_LENGTH
@@ -277,16 +360,35 @@ static void lcd_sync(void)
 {
     if (!s_panel)
         return;
+    // Called by both the display task (gameplay flips) and the main task (GUI writes): without
+    // the lock, a GUI sync landing while the display task waits for vsync cleared s_pending_fb
+    // under it, and the display task then computed s_draw_idx = -1 ^ 1 = -2 (PPA invalid addr).
+    xSemaphoreTake(s_sync_lock, portMAX_DELAY);
 #if MIPI_NUM_FB >= 2
-    if (s_pending_fb >= 0) {
-        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[s_pending_fb]);
-        s_disp_idx   = s_pending_fb;
-        s_draw_idx   = s_pending_fb ^ 1;
+    int fb = s_pending_fb;
+    if (fb >= 0) {
+        xSemaphoreTake(s_vsync_sem, 0); // drop a stale vsync
+        esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[fb]);
+        int64_t t_flip = esp_timer_get_time();
+        // The DMA latches the buffer index when it restarts, which is shortly *before* the vsync
+        // event (end of active area → front porch). A flip requested inside that gap only takes
+        // effect a refresh later, so if vsync came too soon after the flip, wait for one more.
+        for (int i = 0; i < 3; i++) {
+            if (xSemaphoreTake(s_vsync_sem, pdMS_TO_TICKS(40)) != pdTRUE)
+                break; // panel not refreshing? don't hang the display task
+            if (s_vsync_time - t_flip >= MIPI_FLIP_GUARD_US)
+                break;
+        }
+        s_disp_idx   = fb;
+        s_draw_idx   = fb ^ 1;
         s_pending_fb = -1;
+        PACING_PROF_PRESENT();
+        xSemaphoreGive(s_sync_lock);
         return;
     }
 #endif
     esp_lcd_panel_draw_bitmap(s_panel, 0, 0, MIPI_W, MIPI_H, s_fb[s_disp_idx]);
+    xSemaphoreGive(s_sync_lock);
 }
 
 static const rg_display_driver_t rg_display_driver_mipi_dsi = {
@@ -468,12 +570,15 @@ static void lcd_submit_surface(const rg_surface_t *surface)
         .mode           = PPA_TRANS_MODE_BLOCKING,
     };
 
+    int64_t ppa_start = esp_timer_get_time();
     ESP_ERROR_CHECK(ppa_do_scale_rotate_mirror(s_ppa_srm, &srm));
+    PACING_PROF_FRAME(esp_timer_get_time() - ppa_start);
+    (void)ppa_start;
 
 #if MIPI_NUM_FB >= 2
     // Don't present here — display_task() always calls lcd_sync() right after us, and that is the
-    // single draw_bitmap per frame (issuing a second one would wait on vsync twice → half rate).
-    // Just mark the freshly rendered back buffer as the one to flip to.
+    // single flip per frame (it waits for the vsync that makes it visible, so the panel paces
+    // emulation). Just mark the freshly rendered back buffer as the one to flip to.
     s_pending_fb = s_draw_idx;
 #endif
 }
