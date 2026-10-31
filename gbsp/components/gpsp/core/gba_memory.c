@@ -3142,6 +3142,13 @@ bool memory_read_savestate(const u8 *src)
 
   rtc_data = rtc_data_array[0] | (((u64)rtc_data_array[1]) << 32);
 
+  /* The wait-state tables derive from WAITCNT, which was just restored.
+     Without this, a state loaded after a reset kept the WAITCNT=0 costs
+     (ROM S=3/N=5 instead of e.g. 2/4), so games lagged after a resume.
+     gba_load_state() flushes the JIT after this, so code is retranslated
+     with the restored waits. */
+  reload_timing_info();
+
   return true;
 }
 
