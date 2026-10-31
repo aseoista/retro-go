@@ -512,6 +512,18 @@ void reload_timing_info()
   ws_cyc_seq[0xA][0] = ws_cyc_seq[0xB][0] = 1 + ws1_seq[(waitcnt >>  7) & 1];
   ws_cyc_seq[0xC][0] = ws_cyc_seq[0xD][0] = 1 + ws2_seq[(waitcnt >> 10) & 1];
 
+  /* GamePak prefetch (WAITCNT bit 14): the buffer fetches ahead while the
+     CPU is busy with internal and RAM cycles, hiding most sequential ROM
+     waits. Approximate it as zero-wait sequential access (as VBA-M does);
+     non-sequential accesses keep their full cost. Without this, ROM code
+     costs too much and games lag where real hardware does not (e.g. the
+     Super Mario Advance 2 status bar blinking). */
+  if (waitcnt & 0x4000)
+  {
+    for (i = 0x8; i <= 0xD; i++)
+      ws_cyc_seq[i][0] = 1;
+  }
+
   for (i = 0x8; i <= 0xD; i++)
   {
     /* 32 bit accesses just cost double due to 16 bit bus */
@@ -1345,8 +1357,8 @@ cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
     case REG_WAITCNT:
     {
 #if defined(GPSP_RV32_JIT)
-      /* reload_timing_info() reads only the ROM wait fields. */
-      bool changed = (value ^ read_ioreg(REG_WAITCNT)) & 0x07FC;
+      /* reload_timing_info() reads only the ROM wait and prefetch fields. */
+      bool changed = (value ^ read_ioreg(REG_WAITCNT)) & 0x47FC;
 #endif
       write_ioreg(REG_WAITCNT, value);
       reload_timing_info();
