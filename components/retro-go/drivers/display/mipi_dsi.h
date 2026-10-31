@@ -141,6 +141,12 @@ static void lcd_init(void)
     esp_lcd_dpi_panel_config_t dpi_cfg =
         ST7703_720_720_PANEL_60HZ_DPI_CONFIG(LCD_COLOR_PIXEL_FORMAT_RGB888);
     dpi_cfg.num_fbs = MIPI_NUM_FB;
+    // The vendor "60 Hz" config actually yields ~62.3 Hz: the 38 MHz request becomes
+    // PLL_F240M / 6 = 40 MHz. Widen the vertical blanking to get close to 60 Hz content:
+    //   H_total = 720+50+20+50 = 840 ; V_total = 720+34+4+34 = 792
+    //   40 MHz / (840 * 792) = 60.125 Hz
+    dpi_cfg.video_timing.vsync_back_porch  = 34;
+    dpi_cfg.video_timing.vsync_front_porch = 34;
 
     st7703_vendor_config_t vendor_cfg = {
         .flags        = { .use_mipi_interface = 1 },
